@@ -9,11 +9,12 @@ import { RolesGuard } from './roles.guard';
 @Module({
   imports: [
     JwtModule.register({
-      secret: process.env.JWT_SECRET ?? 'dev-secret',
+      secret: process.env.JWT_SECRET ?? 'schedula-super-secret-jwt-key',
       signOptions: { expiresIn: '1h' },
     }),
   ],
   controllers: [AuthController],
   providers: [AuthService, JwtAuthGuard, RolesGuard, Reflector],
+  exports: [JwtAuthGuard, RolesGuard, JwtModule, AuthService],
 })
 export class AuthModule {}
