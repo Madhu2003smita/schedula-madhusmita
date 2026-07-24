@@ -1,17 +1,29 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { AuthModule } from '../auth/auth.module';
-import { AvailabilityController } from './availability.controller';
+import { Booking } from '../scheduling/entities/booking.entity';
+import { StreamSlot } from '../scheduling/entities/stream-slot.entity';
+import { Wave } from '../scheduling/entities/wave.entity';
+import {
+  AvailabilityController,
+  PatientAvailabilityController,
+} from './availability.controller';
 import { AvailabilityService } from './availability.service';
 import { CustomAvailability } from './entities/custom-availability.entity';
 import { RecurringAvailability } from './entities/recurring-availability.entity';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([RecurringAvailability, CustomAvailability]),
+    TypeOrmModule.forFeature([
+      RecurringAvailability,
+      CustomAvailability,
+      StreamSlot,
+      Wave,
+      Booking,
+    ]),
     AuthModule,
   ],
-  controllers: [AvailabilityController],
+  controllers: [AvailabilityController, PatientAvailabilityController],
   providers: [AvailabilityService],
   exports: [AvailabilityService],
 })
