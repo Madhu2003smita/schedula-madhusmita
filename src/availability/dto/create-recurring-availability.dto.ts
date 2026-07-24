@@ -1,0 +1,19 @@
+import { IsEnum, IsString, Matches } from 'class-validator';
+import { DayOfWeek } from '../entities/recurring-availability.entity';
+
+const TIME_REGEX = /^([01]\d|2[0-3]):([0-5]\d)$/;
+
+export class CreateRecurringAvailabilityDto {
+  @IsEnum(DayOfWeek, {
+    message: 'dayOfWeek must be one of: MONDAY, TUESDAY, WEDNESDAY, THURSDAY, FRIDAY, SATURDAY, SUNDAY',
+  })
+  dayOfWeek!: DayOfWeek;
+
+  @IsString()
+  @Matches(TIME_REGEX, { message: 'startTime must be in HH:MM format (e.g. 10:00)' })
+  startTime!: string;
+
+  @IsString()
+  @Matches(TIME_REGEX, { message: 'endTime must be in HH:MM format (e.g. 13:00)' })
+  endTime!: string;
+}
