@@ -41,15 +41,13 @@ export class RecurringAvailability {
   @Column({ type: 'enum', enum: SchedulingType })
   schedulingType!: SchedulingType;
 
+  
   @Column({ type: 'int', nullable: true })
-  slotDuration!: number | null; 
-
-  @Column({ type: 'int', nullable: true, default: 0 })
-  bufferTime!: number | null; 
+  slotDuration!: number | null;
 
   
   @Column({ type: 'int', nullable: true })
-  maxCapacity!: number | null; 
+  maxCapacity!: number | null;
 
   @CreateDateColumn()
   createdAt!: Date;
