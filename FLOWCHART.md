@@ -127,3 +127,118 @@ Patient gets token number
 | Use case | Specialists, detailed consult | OPD, high volume |
 | Overbooking | Not possible (slot marked booked) | Not possible (capacity check) |
 | Token | Not applicable | Sequential (1, 2, 3...) |
+
+---
+
+## Appointment Booking Flow
+
+```
+Patient selects doctor
+           │
+           ▼
+Patient selects date
+  POST /appointment
+  { doctorId, date, ... }
+           │
+           ▼
+Is it STREAM or WAVE?
+    ┌──────┴──────┐
+  STREAM         WAVE
+    │               │
+    ▼               ▼
+Provide          Provide
+startTime +      waveId
+endTime
+    │               │
+    └──────┬─────────┘
+           ▼
+Validate future date?
+  ┌────────┴────────┐
+  Past date         Future date
+  │                 │
+  ▼                 ▼
+400 Bad Request   Continue
+                   │
+                   ▼
+        Does slot/wave exist?
+  ┌────────────────┴───────────────┐
+  Not Found                      Found
+  │                                │
+  ▼                                ▼
+404 Not Found             Is slot/wave available?
+                   ┌───────────────┴──────────────┐
+                Already Booked/Full             Available
+                │                                  │
+                ▼                                  ▼
+          409 Conflict              Duplicate booking by same patient?
+                                ┌──────────────────┴────────────────┐
+                              Yes                                   No
+                               │                                    │
+                               ▼                                    ▼
+                         409 Conflict                    ✅ Create Appointment
+                                                          status = BOOKED
+                                                               │
+                                                               ▼
+                                                    Mark slot as isBooked=true
+                                                    OR increment wave.bookedCount
+                                                               │
+                                                               ▼
+                                                    Return appointmentId + details
+                                                    (STREAM: appointmentTime)
+                                                    (WAVE: tokenNumber)
+```
+
+---
+
+## Appointment Cancellation Flow
+
+```
+Patient requests cancellation
+  PATCH /appointment/:id/cancel
+           │
+           ▼
+Does appointment exist?
+  ┌────────┴────────┐
+  Not Found         Found
+  │                 │
+  ▼                 ▼
+404 Not Found   Is patient the owner?
+                ┌───────┴───────┐
+              No               Yes
+              │                 │
+              ▼                 ▼
+         403 Forbidden    Already cancelled?
+                          ┌───────┴───────┐
+                         Yes             No
+                          │               │
+                          ▼               ▼
+                   409 Conflict    Is it a past appointment?
+                                   ┌───────┴───────┐
+                                  Yes             No
+                                   │               │
+                                   ▼               ▼
+                             400 Bad Request  ✅ Cancel Appointment
+                                              status = CANCELLED
+                                                    │
+                                                    ▼
+                                        STREAM: Free up slot
+                                        WAVE: Decrement bookedCount
+```
+
+---
+
+## Status Codes Summary
+
+| Scenario | Code |
+|----------|------|
+| Booking successful | 201 Created |
+| Slot not found | 404 Not Found |
+| Slot already booked / wave full | 409 Conflict |
+| Past date | 400 Bad Request |
+| Duplicate booking | 409 Conflict |
+| Wrong role | 403 Forbidden |
+| No token | 401 Unauthorized |
+| Cancel successful | 200 OK |
+| Already cancelled | 409 Conflict |
+| Cancel past appointment | 400 Bad Request |
+| Not owner | 403 Forbidden |
