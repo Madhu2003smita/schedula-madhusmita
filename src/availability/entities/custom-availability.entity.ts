@@ -5,6 +5,7 @@ import {
   PrimaryGeneratedColumn,
   UpdateDateColumn,
 } from 'typeorm';
+import { SchedulingType } from './recurring-availability.entity';
 
 @Entity('custom_availability')
 export class CustomAvailability {
@@ -12,16 +13,27 @@ export class CustomAvailability {
   id!: string;
 
   @Column()
-  doctorId!: string; 
+  doctorId!: string;
 
   @Column({ type: 'date' })
-  date!: string; 
+  date!: string;
 
   @Column({ type: 'time' })
-  startTime!: string; 
+  startTime!: string;
 
   @Column({ type: 'time' })
-  endTime!: string; 
+  endTime!: string;
+
+  @Column({ type: 'enum', enum: SchedulingType })
+  schedulingType!: SchedulingType;
+
+  
+  @Column({ type: 'int', nullable: true })
+  slotDuration!: number | null;
+
+
+  @Column({ type: 'int', nullable: true })
+  maxCapacity!: number | null;
 
   @CreateDateColumn()
   createdAt!: Date;

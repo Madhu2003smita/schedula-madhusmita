@@ -1,5 +1,15 @@
-import { IsEnum, IsString, Matches } from 'class-validator';
-import { DayOfWeek } from '../entities/recurring-availability.entity';
+import {
+  IsEnum,
+  IsInt,
+  IsString,
+  Matches,
+  Min,
+  ValidateIf,
+} from 'class-validator';
+import {
+  DayOfWeek,
+  SchedulingType,
+} from '../entities/recurring-availability.entity';
 
 const TIME_REGEX = /^([01]\d|2[0-3]):([0-5]\d)$/;
 
@@ -16,4 +26,21 @@ export class CreateRecurringAvailabilityDto {
   @IsString()
   @Matches(TIME_REGEX, { message: 'endTime must be in HH:MM format (e.g. 13:00)' })
   endTime!: string;
+
+  @IsEnum(SchedulingType, {
+    message: 'schedulingType must be either STREAM or WAVE',
+  })
+  schedulingType!: SchedulingType;
+
+
+  @ValidateIf((o) => o.schedulingType === SchedulingType.WAVE)
+  @IsInt()
+  @Min(1, { message: 'maxCapacity must be at least 1' })
+  maxCapacity?: number;
+
+
+  @ValidateIf((o) => o.schedulingType === SchedulingType.WAVE)
+  @IsInt()
+  @Min(5, { message: 'slotDuration must be at least 5 minutes' })
+  slotDuration?: number;
 }

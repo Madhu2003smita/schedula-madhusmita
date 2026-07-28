@@ -16,6 +16,11 @@ export enum DayOfWeek {
   SUNDAY = 'SUNDAY',
 }
 
+export enum SchedulingType {
+  STREAM = 'STREAM',
+  WAVE = 'WAVE',
+}
+
 @Entity('recurring_availability')
 export class RecurringAvailability {
   @PrimaryGeneratedColumn('uuid')
@@ -25,13 +30,24 @@ export class RecurringAvailability {
   doctorId!: string;
 
   @Column({ type: 'enum', enum: DayOfWeek })
-  dayOfWeek!: DayOfWeek; 
+  dayOfWeek!: DayOfWeek;
 
   @Column({ type: 'time' })
-  startTime!: string; 
+  startTime!: string;
 
   @Column({ type: 'time' })
-  endTime!: string; 
+  endTime!: string;
+
+  @Column({ type: 'enum', enum: SchedulingType })
+  schedulingType!: SchedulingType;
+
+  
+  @Column({ type: 'int', nullable: true })
+  slotDuration!: number | null;
+
+  
+  @Column({ type: 'int', nullable: true })
+  maxCapacity!: number | null;
 
   @CreateDateColumn()
   createdAt!: Date;
