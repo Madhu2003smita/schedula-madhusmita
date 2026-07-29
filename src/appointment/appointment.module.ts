@@ -17,5 +17,6 @@ import { Appointment } from './entities/appointment.entity';
   ],
   controllers: [AppointmentController, DoctorAppointmentController],
   providers: [AppointmentService],
+  exports: [AppointmentService],
 })
 export class AppointmentModule {}

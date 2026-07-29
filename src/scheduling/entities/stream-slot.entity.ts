@@ -15,14 +15,23 @@ export class StreamSlot {
   doctorId!: string;
 
   @Column({ type: 'date' })
-  date!: string; 
+  date!: string;
 
   @Column({ type: 'time' })
-  startTime!: string; 
+  startTime!: string;
 
   @Column({ type: 'time' })
-  endTime!: string; 
+  endTime!: string;
 
+  
+  @Column({ type: 'int', default: 1 })
+  maxCapacity!: number;
+
+
+  @Column({ type: 'int', default: 0 })
+  bookedCount!: number;
+
+  
   @Column({ default: false })
   isBooked!: boolean;
 

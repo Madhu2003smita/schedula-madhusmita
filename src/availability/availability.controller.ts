@@ -15,6 +15,8 @@ import {
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { Roles } from '../auth/roles.decorator';
 import { RolesGuard } from '../auth/roles.guard';
+import { AppointmentService } from '../appointment/appointment.service';
+import { BookAppointmentDto } from '../appointment/dto/book-appointment.dto';
 import { AvailabilityService } from './availability.service';
 import { CreateCustomAvailabilityDto } from './dto/create-custom-availability.dto';
 import { CreateRecurringAvailabilityDto } from './dto/create-recurring-availability.dto';
@@ -87,9 +89,16 @@ export class AvailabilityController {
 @UseGuards(JwtAuthGuard, RolesGuard)
 @Roles('PATIENT')
 export class PatientAvailabilityController {
-  constructor(private readonly availabilityService: AvailabilityService) {}
+  constructor(
+    private readonly availabilityService: AvailabilityService,
+    private readonly appointmentService: AppointmentService,
+  ) {}
 
- 
+  /**
+   * GET /patient/availability/:doctorId?date=YYYY-MM-DD
+   * Returns generated slots with id, startTime, endTime, maxCapacity, remainingCapacity.
+   * Use the returned slot/wave id when calling POST /appointment.
+   */
   @Get(':doctorId')
   getSlots(@Param('doctorId') doctorId: string, @Query('date') date: string) {
     if (!date) {
@@ -98,23 +107,47 @@ export class PatientAvailabilityController {
     return this.availabilityService.getGeneratedSlots(doctorId, date);
   }
 
-
+  /**
+   * POST /patient/availability/book/stream
+   * Books a STREAM slot using the streamSlotId returned by GET /patient/availability/:doctorId.
+   * Delegates to AppointmentService so the appointment can be cancelled/rescheduled via
+   * PATCH /appointment/:id/cancel and PATCH /appointment/:id/reschedule.
+   *
+   * Body: { streamSlotId: string, doctorId: string, date: string }
+   */
   @Post('book/stream')
   @HttpCode(HttpStatus.CREATED)
   bookStream(
     @Req() req: any,
-    @Body() body: { streamSlotId: string; doctorId: string },
+    @Body() body: { streamSlotId: string; doctorId: string; date: string },
   ) {
-    return this.availabilityService.bookStreamSlot(req.user.id, body.streamSlotId, body.doctorId);
+    const dto: BookAppointmentDto = {
+      doctorId: body.doctorId,
+      date: body.date,
+      streamSlotId: body.streamSlotId,
+    };
+    return this.appointmentService.bookAppointment(req.user.id, dto);
   }
 
- 
+  /**
+   * POST /patient/availability/book/wave
+   * Books a WAVE slot using the waveId returned by GET /patient/availability/:doctorId.
+   * Delegates to AppointmentService so the appointment can be cancelled/rescheduled via
+   * PATCH /appointment/:id/cancel and PATCH /appointment/:id/reschedule.
+   *
+   * Body: { waveId: string, doctorId: string, date: string }
+   */
   @Post('book/wave')
   @HttpCode(HttpStatus.CREATED)
   bookWave(
     @Req() req: any,
-    @Body() body: { waveId: string; doctorId: string },
+    @Body() body: { waveId: string; doctorId: string; date: string },
   ) {
-    return this.availabilityService.bookWaveSlot(req.user.id, body.waveId, body.doctorId);
+    const dto: BookAppointmentDto = {
+      doctorId: body.doctorId,
+      date: body.date,
+      waveId: body.waveId,
+    };
+    return this.appointmentService.bookAppointment(req.user.id, dto);
   }
 }

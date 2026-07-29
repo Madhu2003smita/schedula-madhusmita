@@ -15,6 +15,7 @@ import { Roles } from '../auth/roles.decorator';
 import { RolesGuard } from '../auth/roles.guard';
 import { AppointmentService } from './appointment.service';
 import { BookAppointmentDto } from './dto/book-appointment.dto';
+import { RescheduleAppointmentDto } from './dto/reschedule-appointment.dto';
 
 
 @Controller('appointment')
@@ -38,6 +39,19 @@ export class AppointmentController {
   @Patch(':id/cancel')
   cancelAppointment(@Req() req: any, @Param('id') id: string) {
     return this.appointmentService.cancelAppointment(req.user.id, id);
+  }
+
+  /**
+   * PATCH /appointment/:id/reschedule
+   * Patient reschedules their appointment to a new slot
+   */
+  @Patch(':id/reschedule')
+  rescheduleAppointment(
+    @Req() req: any,
+    @Param('id') id: string,
+    @Body() dto: RescheduleAppointmentDto,
+  ) {
+    return this.appointmentService.rescheduleAppointment(req.user.id, id, dto);
   }
 }
 
