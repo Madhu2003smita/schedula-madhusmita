@@ -9,9 +9,17 @@ import { Repository } from 'typeorm';
 import { Booking, BookingType } from '../scheduling/entities/booking.entity';
 import { StreamSlot } from '../scheduling/entities/stream-slot.entity';
 import { Wave } from '../scheduling/entities/wave.entity';
+import {
+  AvailabilityByDateResponse,
+  CustomAvailabilityResponse,
+  CustomAvailabilityWithSummary,
+  RecurringAvailabilityResponse,
+  RecurringAvailabilityWithSummary,
+} from './availability-response.types';
 import { CreateCustomAvailabilityDto } from './dto/create-custom-availability.dto';
 import { CreateRecurringAvailabilityDto } from './dto/create-recurring-availability.dto';
 import { UpdateRecurringAvailabilityDto } from './dto/update-recurring-availability.dto';
+import { AvailabilityType } from './availability-type.enum';
 import { CustomAvailability } from './entities/custom-availability.entity';
 import {
   DayOfWeek,
@@ -36,27 +44,19 @@ export class AvailabilityService {
 
   
 
-  async createRecurring(doctorId: string, dto: CreateRecurringAvailabilityDto) {
+  async createRecurring(
+    doctorId: string,
+    dto: CreateRecurringAvailabilityDto,
+  ): Promise<RecurringAvailabilityWithSummary> {
     this.validateTimeRange(dto.startTime, dto.endTime);
 
-    
     const existing = await this.recurringRepo.find({
       where: { doctorId, dayOfWeek: dto.dayOfWeek },
     });
     this.checkOverlaps(existing, dto.startTime, dto.endTime);
 
-    
-    let calculatedMaxCapacity = dto.maxCapacity;
-    if (dto.schedulingType === SchedulingType.STREAM) {
-      const sessionMins = this.timeToMinutes(dto.endTime) - this.timeToMinutes(dto.startTime);
-      const totalSlotTime = dto.slotDuration;
-      calculatedMaxCapacity = Math.floor(sessionMins / totalSlotTime);
-
-      if (calculatedMaxCapacity === 0) {
-        throw new BadRequestException(
-          `Session too short to fit even one ${dto.slotDuration} min slot`,
-        );
-      }
+    if (dto.schedulingType === SchedulingType.WAVE && !dto.slotDuration) {
+      throw new BadRequestException('slotDuration is required for WAVE scheduling');
     }
 
     const availability = this.recurringRepo.create({
@@ -65,45 +65,47 @@ export class AvailabilityService {
       startTime: dto.startTime,
       endTime: dto.endTime,
       schedulingType: dto.schedulingType,
-      slotDuration: dto.slotDuration,
-      maxCapacity: calculatedMaxCapacity,
-      bufferTime: dto.bufferTime ?? 0,
+      slotDuration: dto.schedulingType === SchedulingType.WAVE ? dto.slotDuration! : null,
+      maxCapacity: dto.maxCapacity,
     });
 
     const saved = await this.recurringRepo.save(availability);
 
+    const sessionMins = this.timeToMinutes(dto.endTime) - this.timeToMinutes(dto.startTime);
+
     return {
-      ...saved,
-      ...(dto.schedulingType === SchedulingType.STREAM && {
-        calculatedMaxPatients: calculatedMaxCapacity,
-        summary: `Session: ${dto.startTime}–${dto.endTime} (${this.timeToMinutes(dto.endTime) - this.timeToMinutes(dto.startTime)} min) → ${calculatedMaxCapacity} slots of ${dto.slotDuration} min`,
-      }),
+      ...this.formatRecurringAvailability(saved),
+      summary:
+        dto.schedulingType === SchedulingType.STREAM
+          ? `STREAM: ${dto.startTime}–${dto.endTime} (${sessionMins} min) → up to ${dto.maxCapacity} patients`
+          : `WAVE: ${dto.startTime}–${dto.endTime} (${sessionMins} min) → ${Math.floor(sessionMins / dto.slotDuration!)} waves of ${dto.slotDuration} min, ${dto.maxCapacity} patients each`,
     };
   }
 
-  async getRecurring(doctorId: string) {
-    return this.recurringRepo.find({
+  async getRecurring(doctorId: string): Promise<RecurringAvailabilityResponse[]> {
+    const items = await this.recurringRepo.find({
       where: { doctorId },
       order: { dayOfWeek: 'ASC', startTime: 'ASC' },
     });
+    return items.map((item) => this.formatRecurringAvailability(item));
   }
 
+  async getRecurringById(doctorId: string, id: string): Promise<RecurringAvailabilityResponse> {
+    const availability = await this.recurringRepo.findOne({
+      where: { id, doctorId },
+    });
 
-  async getRecurringById(doctorId: string, id: string) {
-  const availability = await this.recurringRepo.findOne({
-    where: {
-      id,
-      doctorId,
-    },
-  });
+    if (!availability) {
+      throw new NotFoundException('Recurring availability not found');
+    }
 
-  if (!availability) {
-    throw new NotFoundException('Recurring availability not found');
+    return this.formatRecurringAvailability(availability);
   }
-
-  return availability;
-}
-  async updateRecurring(doctorId: string, id: string, dto: UpdateRecurringAvailabilityDto) {
+  async updateRecurring(
+    doctorId: string,
+    id: string,
+    dto: UpdateRecurringAvailabilityDto,
+  ): Promise<RecurringAvailabilityResponse> {
     const availability = await this.recurringRepo.findOne({ where: { id, doctorId } });
 
     if (!availability) {
@@ -123,7 +125,8 @@ export class AvailabilityService {
     this.checkOverlaps(filtered, updatedStartTime, updatedEndTime);
 
     Object.assign(availability, dto);
-    return this.recurringRepo.save(availability);
+    const saved = await this.recurringRepo.save(availability);
+    return this.formatRecurringAvailability(saved);
   }
 
   async deleteRecurring(doctorId: string, id: string) {
@@ -139,7 +142,10 @@ export class AvailabilityService {
 
   
 
-  async createCustom(doctorId: string, dto: CreateCustomAvailabilityDto) {
+  async createCustom(
+    doctorId: string,
+    dto: CreateCustomAvailabilityDto,
+  ): Promise<CustomAvailabilityWithSummary> {
     const today = new Date();
     today.setHours(0, 0, 0, 0);
     if (new Date(dto.date) < today) {
@@ -153,18 +159,8 @@ export class AvailabilityService {
     });
     this.checkOverlaps(existing, dto.startTime, dto.endTime);
 
-    
-    let calculatedMaxCapacity = dto.maxCapacity;
-    if (dto.schedulingType === SchedulingType.STREAM) {
-      const sessionMins = this.timeToMinutes(dto.endTime) - this.timeToMinutes(dto.startTime);
-      const totalSlotTime = dto.slotDuration + (dto.bufferTime ?? 0);
-      calculatedMaxCapacity = Math.floor(sessionMins / totalSlotTime);
-
-      if (calculatedMaxCapacity === 0) {
-        throw new BadRequestException(
-          `Session too short to fit even one ${dto.slotDuration} min slot`,
-        );
-      }
+    if (dto.schedulingType === SchedulingType.WAVE && !dto.slotDuration) {
+      throw new BadRequestException('slotDuration is required for WAVE scheduling');
     }
 
     const availability = this.customRepo.create({
@@ -173,17 +169,24 @@ export class AvailabilityService {
       startTime: dto.startTime,
       endTime: dto.endTime,
       schedulingType: dto.schedulingType,
-      slotDuration: dto.slotDuration,
-      maxCapacity: calculatedMaxCapacity,
-      bufferTime: dto.bufferTime ?? 0,
+      slotDuration: dto.schedulingType === SchedulingType.WAVE ? dto.slotDuration! : null,
+      maxCapacity: dto.maxCapacity,
     });
 
-    return this.customRepo.save(availability);
+    const saved = await this.customRepo.save(availability);
+
+    const sessionMins = this.timeToMinutes(dto.endTime) - this.timeToMinutes(dto.startTime);
+
+    return {
+      ...this.formatCustomAvailability(saved),
+      summary:
+        dto.schedulingType === SchedulingType.STREAM
+          ? `STREAM: ${dto.startTime}–${dto.endTime} (${sessionMins} min) → up to ${dto.maxCapacity} patients`
+          : `WAVE: ${dto.startTime}–${dto.endTime} (${sessionMins} min) → ${Math.floor(sessionMins / dto.slotDuration!)} waves of ${dto.slotDuration} min, ${dto.maxCapacity} patients each`,
+    };
   }
 
-  
-
-  async getAvailabilityByDate(doctorId: string, date: string) {
+  async getAvailabilityByDate(doctorId: string, date: string): Promise<AvailabilityByDateResponse> {
     const custom = await this.customRepo.find({
       where: { doctorId, date },
       order: { startTime: 'ASC' },
@@ -192,8 +195,8 @@ export class AvailabilityService {
     if (custom.length > 0) {
       return {
         date,
-        type: 'custom',
-        availability: custom.map((c) => this.formatAvailability(c)),
+        availabilityType: AvailabilityType.CUSTOM,
+        availability: custom.map((c) => this.formatCustomAvailability(c)),
       };
     }
 
@@ -204,27 +207,55 @@ export class AvailabilityService {
     });
 
     if (recurring.length === 0) {
-      return { date, type: 'none', message: 'No availability found for this date' };
+      return { date, availabilityType: null, message: 'No availability found for this date' };
     }
 
     return {
       date,
-      type: 'recurring',
+      availabilityType: AvailabilityType.RECURRING,
       dayOfWeek,
-      availability: recurring.map((r) => this.formatAvailability(r)),
+      availability: recurring.map((r) => this.formatRecurringAvailability(r)),
     };
   }
 
-  private formatAvailability(avail: RecurringAvailability | CustomAvailability) {
-    return {
+  private formatRecurringAvailability(avail: RecurringAvailability): RecurringAvailabilityResponse {
+    const response: RecurringAvailabilityResponse = {
       id: avail.id,
+      availabilityType: AvailabilityType.RECURRING,
+      dayOfWeek: avail.dayOfWeek,
       startTime: avail.startTime,
       endTime: avail.endTime,
       schedulingType: avail.schedulingType,
-      slotDuration: avail.slotDuration,
-      maxCapacity: avail.maxCapacity,
-      bufferTime: avail.bufferTime,
+      maxCapacity: avail.maxCapacity ?? 1,
+      createdAt: avail.createdAt,
+      updatedAt: avail.updatedAt,
     };
+
+    if (avail.schedulingType === SchedulingType.WAVE) {
+      response.slotDuration = avail.slotDuration;
+    }
+
+    return response;
+  }
+
+  private formatCustomAvailability(avail: CustomAvailability): CustomAvailabilityResponse {
+    const response: CustomAvailabilityResponse = {
+      id: avail.id,
+      availabilityType: AvailabilityType.CUSTOM,
+      date: avail.date,
+      startTime: avail.startTime,
+      endTime: avail.endTime,
+      schedulingType: avail.schedulingType,
+      maxCapacity: avail.maxCapacity ?? 1,
+      createdAt: avail.createdAt,
+      updatedAt: avail.updatedAt,
+    };
+
+    if (avail.schedulingType === SchedulingType.WAVE) {
+      response.slotDuration = avail.slotDuration;
+    }
+
+    return response;
   }
 
   
@@ -266,63 +297,42 @@ export class AvailabilityService {
       throw new ConflictException(`Stream slots already generated for ${date}`);
     }
 
-    const slotDuration = availability.slotDuration;
-    if (slotDuration == null || slotDuration <= 0) {
-      throw new BadRequestException('Slot duration is required to generate stream slots');
-    }
-    const buffer = availability.bufferTime ?? 0;
-    const maxCapacity = availability.maxCapacity;
-    if (maxCapacity == null) {
-      throw new BadRequestException('Max capacity is required to generate stream slots');
-    }
-    const totalSlotTime = slotDuration + buffer;
+    const maxCapacity = availability.maxCapacity ?? 1;
+    const sessionMins =
+      this.timeToMinutes(availability.endTime) - this.timeToMinutes(availability.startTime);
 
-    const slots: StreamSlot[] = [];
-    let current = this.timeToMinutes(availability.startTime);
-    const end = this.timeToMinutes(availability.endTime);
+    // STREAM = one single bookable slot covering the entire session window
+    const slot = new StreamSlot();
+    slot.doctorId = doctorId;
+    slot.date = date;
+    slot.startTime = availability.startTime;
+    slot.endTime = availability.endTime;
+    slot.maxCapacity = maxCapacity;
+    slot.bookedCount = 0;
+    slot.isBooked = false;
+    slot.patientId = null;
 
-    while (current + slotDuration <= end) {
-      const slot = this.streamSlotRepo.create({
-        doctorId,
-        date,
-        startTime: this.minutesToTime(current),
-        endTime: this.minutesToTime(current + slotDuration),
-        maxCapacity,
-        bookedCount: 0,
-        isBooked: false,
-        patientId: null,
-      });
-      slots.push(slot);
-      current += totalSlotTime;
-    }
-
-    if (slots.length === 0) {
-      throw new BadRequestException('Session too short to generate any slots');
-    }
-
-    const saved = await this.streamSlotRepo.save(slots);
+    const saved = await this.streamSlotRepo.save(slot);
 
     return {
       schedulingType: 'STREAM',
       date,
-      slotDuration,
-      bufferTime: buffer,
-      maxCapacityPerSlot: maxCapacity,
-      summary: `Session: ${availability.startTime}–${availability.endTime} (${this.timeToMinutes(availability.endTime) - this.timeToMinutes(availability.startTime)} min) → ${saved.length} slots of ${slotDuration} min`,
-      totalSlots: saved.length,
-      slots: saved.map((s) => ({
-        id: s.id,
-        startTime: s.startTime,
-        endTime: s.endTime,
-        maxCapacity: s.maxCapacity,
-        bookedCount: s.bookedCount,
-        remainingCapacity: s.maxCapacity - s.bookedCount,
-        isAvailable: s.bookedCount < s.maxCapacity,
-      })),
+      summary: `STREAM: ${availability.startTime}–${availability.endTime} (${sessionMins} min) → up to ${maxCapacity} patients`,
+      totalSlots: 1,
+      slots: [
+        {
+          id: saved.id,
+          startTime: saved.startTime,
+          endTime: saved.endTime,
+          maxCapacity: saved.maxCapacity,
+          bookedCount: saved.bookedCount,
+          remainingCapacity: saved.maxCapacity - saved.bookedCount,
+          isAvailable: saved.bookedCount < saved.maxCapacity,
+        },
+      ],
     };
   }
 
-  // WAVE: divides time window into slots based on duration
   private async generateWaveSlots(
     doctorId: string,
     availability: RecurringAvailability | CustomAvailability,
@@ -335,14 +345,14 @@ export class AvailabilityService {
       throw new ConflictException(`Wave already exists for ${date} at ${availability.startTime}`);
     }
 
-    // WAVE also divides into slots based on slotDuration
     const slotDuration = availability.slotDuration;
     const maxCapacity = availability.maxCapacity;
-    if (slotDuration == null || slotDuration <= 0) {
-      throw new BadRequestException('Slot duration is required to generate wave slots');
+
+    if (!slotDuration || slotDuration <= 0) {
+      throw new BadRequestException('slotDuration is required to generate wave slots');
     }
-    if (maxCapacity == null || maxCapacity <= 0) {
-      throw new BadRequestException('Max capacity is required to generate wave slots');
+    if (!maxCapacity || maxCapacity <= 0) {
+      throw new BadRequestException('maxCapacity is required to generate wave slots');
     }
 
     const waves: Wave[] = [];
@@ -367,18 +377,18 @@ export class AvailabilityService {
     }
 
     const saved = await this.waveRepo.save(waves);
+    const sessionMins = this.timeToMinutes(availability.endTime) - this.timeToMinutes(availability.startTime);
 
     return {
       schedulingType: 'WAVE',
       date,
-      slotDuration,
-      maxCapacityPerSlot: maxCapacity,
+      summary: `WAVE: ${availability.startTime}–${availability.endTime} (${sessionMins} min) → ${saved.length} waves of ${slotDuration} min, ${maxCapacity} patients each`,
       totalSlots: saved.length,
       waves: saved.map((w) => ({
         id: w.id,
         startTime: w.startTime,
         endTime: w.endTime,
-        maxPatients: w.maxPatients,
+        maxCapacity: w.maxPatients,
         bookedCount: w.bookedCount,
         remainingCapacity: w.maxPatients - w.bookedCount,
         isFull: w.bookedCount >= w.maxPatients,

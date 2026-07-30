@@ -94,11 +94,7 @@ export class PatientAvailabilityController {
     private readonly appointmentService: AppointmentService,
   ) {}
 
-  /**
-   * GET /patient/availability/:doctorId?date=YYYY-MM-DD
-   * Returns generated slots with id, startTime, endTime, maxCapacity, remainingCapacity.
-   * Use the returned slot/wave id when calling POST /appointment.
-   */
+ 
   @Get(':doctorId')
   getSlots(@Param('doctorId') doctorId: string, @Query('date') date: string) {
     if (!date) {
@@ -107,46 +103,47 @@ export class PatientAvailabilityController {
     return this.availabilityService.getGeneratedSlots(doctorId, date);
   }
 
-  /**
-   * POST /patient/availability/book/stream
-   * Books a STREAM slot using the streamSlotId returned by GET /patient/availability/:doctorId.
-   * Delegates to AppointmentService so the appointment can be cancelled/rescheduled via
-   * PATCH /appointment/:id/cancel and PATCH /appointment/:id/reschedule.
-   *
-   * Body: { streamSlotId: string, doctorId: string, date: string }
-   */
-  @Post('book/stream')
+  
+  @Post('book')
   @HttpCode(HttpStatus.CREATED)
-  bookStream(
+  book(
     @Req() req: any,
-    @Body() body: { streamSlotId: string; doctorId: string; date: string },
+    @Body() body: { slotId: string; doctorId: string; date: string },
   ) {
     const dto: BookAppointmentDto = {
       doctorId: body.doctorId,
       date: body.date,
-      streamSlotId: body.streamSlotId,
+      slotId: body.slotId,
     };
     return this.appointmentService.bookAppointment(req.user.id, dto);
   }
 
-  /**
-   * POST /patient/availability/book/wave
-   * Books a WAVE slot using the waveId returned by GET /patient/availability/:doctorId.
-   * Delegates to AppointmentService so the appointment can be cancelled/rescheduled via
-   * PATCH /appointment/:id/cancel and PATCH /appointment/:id/reschedule.
-   *
-   * Body: { waveId: string, doctorId: string, date: string }
-   */
-  @Post('book/wave')
+ 
+  @Post('book/stream')
   @HttpCode(HttpStatus.CREATED)
-  bookWave(
+  bookStream(
     @Req() req: any,
-    @Body() body: { waveId: string; doctorId: string; date: string },
+    @Body() body: { slotId: string; doctorId: string; date: string },
   ) {
     const dto: BookAppointmentDto = {
       doctorId: body.doctorId,
       date: body.date,
-      waveId: body.waveId,
+      slotId: body.slotId,
+    };
+    return this.appointmentService.bookAppointment(req.user.id, dto);
+  }
+
+
+  @Post('book/wave')
+  @HttpCode(HttpStatus.CREATED)
+  bookWave(
+    @Req() req: any,
+    @Body() body: { slotId: string; doctorId: string; date: string },
+  ) {
+    const dto: BookAppointmentDto = {
+      doctorId: body.doctorId,
+      date: body.date,
+      slotId: body.slotId,
     };
     return this.appointmentService.bookAppointment(req.user.id, dto);
   }
