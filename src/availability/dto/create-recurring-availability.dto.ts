@@ -21,11 +21,11 @@ export class CreateRecurringAvailabilityDto {
   dayOfWeek!: DayOfWeek;
 
   @IsString()
-  @Matches(TIME_REGEX, { message: 'startTime must be in HH:MM format (e.g. 10:00)' })
+  @Matches(TIME_REGEX, { message: 'startTime must be in HH:MM format (e.g. 09:00)' })
   startTime!: string;
 
   @IsString()
-  @Matches(TIME_REGEX, { message: 'endTime must be in HH:MM format (e.g. 13:00)' })
+  @Matches(TIME_REGEX, { message: 'endTime must be in HH:MM format (e.g. 12:00)' })
   endTime!: string;
 
   @IsEnum(SchedulingType, {
@@ -33,20 +33,16 @@ export class CreateRecurringAvailabilityDto {
   })
   schedulingType!: SchedulingType;
 
-  
-  @IsInt()
-  @Min(5, { message: 'slotDuration must be at least 5 minutes' })
-  slotDuration!: number;
-
-  
+  // STREAM: total patients for the whole session window (no slot subdivision)
+  // WAVE: patients per wave window (each window = slotDuration mins)
   @IsInt()
   @Min(1, { message: 'maxCapacity must be at least 1' })
   maxCapacity!: number;
 
-  
+  // WAVE only: length of each wave window in minutes
   @IsOptional()
-  @ValidateIf((o) => o.schedulingType === SchedulingType.STREAM)
+  @ValidateIf((o) => o.schedulingType === SchedulingType.WAVE)
   @IsInt()
-  @Min(0, { message: 'bufferTime cannot be negative' })
-  bufferTime?: number;
+  @Min(5, { message: 'slotDuration must be at least 5 minutes' })
+  slotDuration?: number;
 }

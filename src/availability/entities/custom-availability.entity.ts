@@ -27,17 +27,15 @@ export class CustomAvailability {
   @Column({ type: 'enum', enum: SchedulingType })
   schedulingType!: SchedulingType;
 
-  
-  @Column({ type: 'int' })
-  slotDuration!: number;
+
+  @Column({ type: 'int', nullable: true })
+  slotDuration!: number | null;
 
   
-  @Column({ type: 'int' })
+  @Column({ type: 'int', nullable: false })
   maxCapacity!: number;
 
   
-  @Column({ type: 'int', default: 0 })
-  bufferTime!: number;
 
   @CreateDateColumn()
   createdAt!: Date;

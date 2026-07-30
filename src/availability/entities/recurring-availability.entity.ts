@@ -41,17 +41,15 @@ export class RecurringAvailability {
   @Column({ type: 'enum', enum: SchedulingType })
   schedulingType: SchedulingType;
 
-  // Duration per slot in minutes (used for both STREAM and WAVE)
-  @Column({ type: 'int' })
-  slotDuration: number;
+  // WAVE only: length of each wave window in minutes. Null for STREAM.
+  @Column({ type: 'int', nullable: true })
+  slotDuration: number | null;
 
-  // Max patients per slot (for both STREAM and WAVE)
-  @Column({ type: 'int' })
-  maxCapacity: number;
+  // Max patients per slot (STREAM: whole session; WAVE: per wave window)
+  @Column({ type: 'int', nullable: false })
+  maxCapacity!: number;
 
-  // STREAM only: optional buffer time between slots in minutes
-  @Column({ type: 'int', default: 0 })
-  bufferTime: number;
+  // Removed: bufferTime was STREAM-only and is no longer used
 
   @CreateDateColumn()
   createdAt: Date;

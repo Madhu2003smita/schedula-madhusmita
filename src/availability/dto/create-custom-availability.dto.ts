@@ -31,18 +31,13 @@ export class CreateCustomAvailabilityDto {
 
   
   @IsInt()
-  @Min(5, { message: 'slotDuration must be at least 5 minutes' })
-  slotDuration!: number;
-
-  
-  @IsInt()
   @Min(1, { message: 'maxCapacity must be at least 1' })
   maxCapacity!: number;
 
-  
+
   @IsOptional()
-  @ValidateIf((o) => o.schedulingType === SchedulingType.STREAM)
+  @ValidateIf((o) => o.schedulingType === SchedulingType.WAVE)
   @IsInt()
-  @Min(0, { message: 'bufferTime cannot be negative' })
-  bufferTime?: number;
+  @Min(5, { message: 'slotDuration must be at least 5 minutes' })
+  slotDuration?: number;
 }
