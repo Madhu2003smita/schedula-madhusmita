@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { AuthModule } from '../auth/auth.module';
+import { AppointmentModule } from '../appointment/appointment.module';
 import { Booking } from '../scheduling/entities/booking.entity';
 import { StreamSlot } from '../scheduling/entities/stream-slot.entity';
 import { Wave } from '../scheduling/entities/wave.entity';
@@ -22,6 +23,7 @@ import { RecurringAvailability } from './entities/recurring-availability.entity'
       Booking,
     ]),
     AuthModule,
+    AppointmentModule,
   ],
   controllers: [AvailabilityController, PatientAvailabilityController],
   providers: [AvailabilityService],

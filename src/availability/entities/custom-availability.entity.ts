@@ -28,12 +28,16 @@ export class CustomAvailability {
   schedulingType!: SchedulingType;
 
   
-  @Column({ type: 'int', nullable: true })
-  slotDuration!: number | null;
+  @Column({ type: 'int' })
+  slotDuration!: number;
 
+  
+  @Column({ type: 'int' })
+  maxCapacity!: number;
 
-  @Column({ type: 'int', nullable: true })
-  maxCapacity!: number | null;
+  
+  @Column({ type: 'int', default: 0 })
+  bufferTime!: number;
 
   @CreateDateColumn()
   createdAt!: Date;

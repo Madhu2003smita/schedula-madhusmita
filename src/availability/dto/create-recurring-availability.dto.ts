@@ -1,6 +1,7 @@
 import {
   IsEnum,
   IsInt,
+  IsOptional,
   IsString,
   Matches,
   Min,
@@ -32,15 +33,20 @@ export class CreateRecurringAvailabilityDto {
   })
   schedulingType!: SchedulingType;
 
-
-  @ValidateIf((o) => o.schedulingType === SchedulingType.WAVE)
-  @IsInt()
-  @Min(1, { message: 'maxCapacity must be at least 1' })
-  maxCapacity?: number;
-
-
-  @ValidateIf((o) => o.schedulingType === SchedulingType.WAVE)
+  
   @IsInt()
   @Min(5, { message: 'slotDuration must be at least 5 minutes' })
-  slotDuration?: number;
+  slotDuration!: number;
+
+  
+  @IsInt()
+  @Min(1, { message: 'maxCapacity must be at least 1' })
+  maxCapacity!: number;
+
+  
+  @IsOptional()
+  @ValidateIf((o) => o.schedulingType === SchedulingType.STREAM)
+  @IsInt()
+  @Min(0, { message: 'bufferTime cannot be negative' })
+  bufferTime?: number;
 }
