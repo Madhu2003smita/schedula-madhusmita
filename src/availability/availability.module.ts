@@ -5,23 +5,14 @@ import { AppointmentModule } from '../appointment/appointment.module';
 import { Booking } from '../scheduling/entities/booking.entity';
 import { StreamSlot } from '../scheduling/entities/stream-slot.entity';
 import { Wave } from '../scheduling/entities/wave.entity';
-import {
-  AvailabilityController,
-  PatientAvailabilityController,
-} from './availability.controller';
+import { AvailabilityController, PatientAvailabilityController } from './availability.controller';
 import { AvailabilityService } from './availability.service';
 import { CustomAvailability } from './entities/custom-availability.entity';
 import { RecurringAvailability } from './entities/recurring-availability.entity';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([
-      RecurringAvailability,
-      CustomAvailability,
-      StreamSlot,
-      Wave,
-      Booking,
-    ]),
+    TypeOrmModule.forFeature([RecurringAvailability, CustomAvailability, StreamSlot, Wave, Booking]),
     AuthModule,
     AppointmentModule,
   ],

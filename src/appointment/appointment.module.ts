@@ -3,10 +3,7 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { AuthModule } from '../auth/auth.module';
 import { StreamSlot } from '../scheduling/entities/stream-slot.entity';
 import { Wave } from '../scheduling/entities/wave.entity';
-import {
-  AppointmentController,
-  DoctorAppointmentController,
-} from './appointment.controller';
+import { AppointmentController, DoctorAppointmentController } from './appointment.controller';
 import { AppointmentService } from './appointment.service';
 import { Appointment } from './entities/appointment.entity';
 
