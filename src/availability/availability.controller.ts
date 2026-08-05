@@ -21,6 +21,7 @@ import { AvailabilityService } from './availability.service';
 import { CreateCustomAvailabilityDto } from './dto/create-custom-availability.dto';
 import { CreateRecurringAvailabilityDto } from './dto/create-recurring-availability.dto';
 import { UpdateRecurringAvailabilityDto } from './dto/update-recurring-availability.dto';
+import { UpdateCustomAvailabilityDto } from './dto/update-custom-availability.dto';
 
 @Controller('doctor/availability')
 @UseGuards(JwtAuthGuard, RolesGuard)
@@ -28,14 +29,14 @@ import { UpdateRecurringAvailabilityDto } from './dto/update-recurring-availabil
 export class AvailabilityController {
   constructor(private readonly availabilityService: AvailabilityService) {}
 
-  
+  // ── Recurring ──────────────────────────────────────────────────────────────
+
   @Post()
   @HttpCode(HttpStatus.CREATED)
   createRecurring(@Req() req: any, @Body() dto: CreateRecurringAvailabilityDto) {
     return this.availabilityService.createRecurring(req.user.id, dto);
   }
 
-  
   @Get()
   getRecurring(@Req() req: any) {
     return this.availabilityService.getRecurring(req.user.id);
@@ -43,24 +44,39 @@ export class AvailabilityController {
 
  
   @Patch(':id')
-  updateRecurring(@Req() req: any, @Param('id') id: string, @Body() dto: UpdateRecurringAvailabilityDto) {
+  updateRecurring(
+    @Req() req: any,
+    @Param('id') id: string,
+    @Body() dto: UpdateRecurringAvailabilityDto,
+  ) {
     return this.availabilityService.updateRecurring(req.user.id, id, dto);
   }
-
 
   @Delete(':id')
   deleteRecurring(@Req() req: any, @Param('id') id: string) {
     return this.availabilityService.deleteRecurring(req.user.id, id);
   }
 
-  
+  // ── Custom (Override) ──────────────────────────────────────────────────────
+
   @Post('override')
   @HttpCode(HttpStatus.CREATED)
   createCustom(@Req() req: any, @Body() dto: CreateCustomAvailabilityDto) {
     return this.availabilityService.createCustom(req.user.id, dto);
   }
 
- 
+  
+  @Patch('override/:id')
+  updateCustom(
+    @Req() req: any,
+    @Param('id') id: string,
+    @Body() dto: UpdateCustomAvailabilityDto,
+  ) {
+    return this.availabilityService.updateCustom(req.user.id, id, dto);
+  }
+
+  // ── By Date / Generate ────────────────────────────────────────────────────
+
   @Get('date')
   getByDate(@Req() req: any, @Query('date') date: string) {
     if (!date) {
@@ -69,7 +85,6 @@ export class AvailabilityController {
     return this.availabilityService.getAvailabilityByDate(req.user.id, date);
   }
 
-  
   @Post(':id/generate')
   @HttpCode(HttpStatus.CREATED)
   generateSlots(
