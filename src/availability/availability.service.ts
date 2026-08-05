@@ -141,10 +141,23 @@ export class AvailabilityService {
 
     // ── EXPAND ────────────────────────────────────────────────────────────────
     if (isExpand && !isShrink) {
+      const newSlots = await this.expandSlotsForRecurring(
+        doctorId,
+        newDay,
+        availability.schedulingType,
+        availability.slotDuration,
+        availability.maxCapacity ?? 1,
+        oldStartMin,
+        oldEndMin,
+        newStartMin,
+        newEndMin,
+      );
       return {
         ...formatted,
         elasticAction: 'EXPAND',
-        message: 'Availability expanded. Regenerate slots for affected dates to open new booking windows.',
+        newSlotsGenerated: newSlots.totalNew,
+        affectedDates: newSlots.affectedDates,
+        message: `Availability expanded. ${newSlots.totalNew} new slot(s) generated across ${newSlots.affectedDates.length} date(s).`,
       };
     }
 
@@ -290,10 +303,22 @@ export class AvailabilityService {
     const formatted = this.formatCustomAvailability(saved);
 
     if (isExpand && !isShrink) {
+      const newSlots = await this.expandSlotsForCustom(
+        doctorId,
+        availability.date,
+        availability.schedulingType,
+        availability.slotDuration,
+        availability.maxCapacity ?? 1,
+        oldStartMin,
+        oldEndMin,
+        newStartMin,
+        newEndMin,
+      );
       return {
         ...formatted,
         elasticAction: 'EXPAND',
-        message: 'Availability expanded. Regenerate slots for this date to open new booking windows.',
+        newSlotsGenerated: newSlots.totalNew,
+        message: `Availability expanded. ${newSlots.totalNew} new slot(s) generated for ${availability.date}.`,
       };
     }
 
@@ -786,7 +811,162 @@ export class AvailabilityService {
 
 
 
- 
+  // ─── Elastic Scheduling Helpers ─────────────────────────────────────────────
+
+  /**
+   * Generates new slots for the EXPANDED portion of a recurring availability
+   * across all future dates matching the dayOfWeek.
+   *
+   * Only the newly added time windows are generated:
+   *  - If start moved earlier:  generate slots from newStart to oldStart
+   *  - If end moved later:      generate slots from oldEnd to newEnd
+   * Existing slots in the original window are NOT touched.
+   */
+  private async expandSlotsForRecurring(
+    doctorId: string,
+    dayOfWeek: DayOfWeek,
+    schedulingType: SchedulingType,
+    slotDuration: number | null,
+    maxCapacity: number,
+    oldStartMin: number,
+    oldEndMin: number,
+    newStartMin: number,
+    newEndMin: number,
+  ): Promise<{ totalNew: number; affectedDates: string[] }> {
+    const futureDates = this.getFutureDatesForDayOfWeek(dayOfWeek, 60);
+    let totalNew = 0;
+    const affectedDates: string[] = [];
+
+    for (const date of futureDates) {
+      const count = await this.generateExpandedSlots(
+        doctorId, date, schedulingType, slotDuration, maxCapacity,
+        oldStartMin, oldEndMin, newStartMin, newEndMin,
+      );
+      if (count > 0) {
+        totalNew += count;
+        affectedDates.push(date);
+      }
+    }
+
+    return { totalNew, affectedDates };
+  }
+
+  /**
+   * Generates new slots for the EXPANDED portion of a custom availability
+   * for a specific date only.
+   */
+  private async expandSlotsForCustom(
+    doctorId: string,
+    date: string,
+    schedulingType: SchedulingType,
+    slotDuration: number | null,
+    maxCapacity: number,
+    oldStartMin: number,
+    oldEndMin: number,
+    newStartMin: number,
+    newEndMin: number,
+  ): Promise<{ totalNew: number }> {
+    const count = await this.generateExpandedSlots(
+      doctorId, date, schedulingType, slotDuration, maxCapacity,
+      oldStartMin, oldEndMin, newStartMin, newEndMin,
+    );
+    return { totalNew: count };
+  }
+
+  /**
+   * Core logic: generates slots only for the newly added time portions.
+   * Skips dates where no slots were previously generated (no expansion needed).
+   * Returns the number of new slots/waves created.
+   */
+  private async generateExpandedSlots(
+    doctorId: string,
+    date: string,
+    schedulingType: SchedulingType,
+    slotDuration: number | null,
+    maxCapacity: number,
+    oldStartMin: number,
+    oldEndMin: number,
+    newStartMin: number,
+    newEndMin: number,
+  ): Promise<number> {
+    if (schedulingType === SchedulingType.STREAM) {
+      const existing = await this.streamSlotRepo.find({ where: { doctorId, date } });
+      if (existing.length === 0) return 0; // no slots yet on this date — skip
+
+      // STREAM is one single slot covering the whole session.
+      // Extend the existing slot's time boundaries to match the new window.
+      let changed = false;
+      for (const slot of existing) {
+        const slotStart = this.timeToMinutes(slot.startTime.substring(0, 5));
+        const slotEnd   = this.timeToMinutes(slot.endTime.substring(0, 5));
+        if (slotStart === oldStartMin && newStartMin < oldStartMin) {
+          slot.startTime = this.minutesToTime(newStartMin);
+          changed = true;
+        }
+        if (slotEnd === oldEndMin && newEndMin > oldEndMin) {
+          slot.endTime = this.minutesToTime(newEndMin);
+          changed = true;
+        }
+        if (changed) await this.streamSlotRepo.save(slot);
+      }
+      return changed ? 1 : 0;
+
+    } else {
+      // WAVE: generate new wave records only in the newly added time range(s)
+      if (!slotDuration || slotDuration <= 0) return 0;
+
+      const existingWaves = await this.waveRepo.find({ where: { doctorId, date } });
+      if (existingWaves.length === 0) return 0; // no waves yet on this date — skip
+
+      const newWaves: Wave[] = [];
+
+      // Newly added time BEFORE the old start (start moved earlier)
+      if (newStartMin < oldStartMin) {
+        let current = newStartMin;
+        while (current + slotDuration <= oldStartMin) {
+          const startStr = this.minutesToTime(current);
+          const alreadyExists = existingWaves.some(
+            (w) => w.startTime.substring(0, 5) === startStr,
+          );
+          if (!alreadyExists) {
+            newWaves.push(this.waveRepo.create({
+              doctorId, date,
+              startTime: startStr,
+              endTime: this.minutesToTime(current + slotDuration),
+              maxPatients: maxCapacity,
+              bookedCount: 0,
+            }));
+          }
+          current += slotDuration;
+        }
+      }
+
+      // Newly added time AFTER the old end (end moved later)
+      if (newEndMin > oldEndMin) {
+        let current = oldEndMin;
+        while (current + slotDuration <= newEndMin) {
+          const startStr = this.minutesToTime(current);
+          const alreadyExists = existingWaves.some(
+            (w) => w.startTime.substring(0, 5) === startStr,
+          );
+          if (!alreadyExists) {
+            newWaves.push(this.waveRepo.create({
+              doctorId, date,
+              startTime: startStr,
+              endTime: this.minutesToTime(current + slotDuration),
+              maxPatients: maxCapacity,
+              bookedCount: 0,
+            }));
+          }
+          current += slotDuration;
+        }
+      }
+
+      if (newWaves.length > 0) await this.waveRepo.save(newWaves);
+      return newWaves.length;
+    }
+  }
+
   private async tryAutoMoveStream(
     appt: Appointment,
     doctorId: string,
