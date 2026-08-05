@@ -671,9 +671,11 @@ export class AppointmentService {
   ) {
     if (!startTime) return;
 
-    const appointmentStart = new Date(`${date}T${startTime}`);
+    // Treat the stored time as UTC (server timezone on Railway)
+    const timeStr = startTime.substring(0, 5); // normalize to HH:MM
+    const appointmentStart = new Date(`${date}T${timeStr}:00.000Z`);
     const now = new Date();
-    const cutoff = new Date(now.getTime() + 30 * 60 * 1000); // now + 30 min
+    const cutoff = new Date(now.getTime() + 30 * 60 * 1000);
 
     if (appointmentStart <= cutoff) {
       throw new BadRequestException(
