@@ -7,6 +7,8 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, Repository } from 'typeorm';
+import { AuditAction } from '../audit-log/audit-log.entity';
+import { AuditLogService } from '../audit-log/audit-log.service';
 import { StreamSlot } from '../scheduling/entities/stream-slot.entity';
 import { Wave } from '../scheduling/entities/wave.entity';
 import { BookAppointmentDto } from './dto/book-appointment.dto';
@@ -27,6 +29,7 @@ export class AppointmentService {
     @InjectRepository(Wave)
     private readonly waveRepo: Repository<Wave>,
     private readonly dataSource: DataSource,
+    private readonly auditLogService: AuditLogService,
   ) {}
 
 
@@ -123,6 +126,11 @@ export class AppointmentService {
 
       const saved = await manager.save(appointment);
 
+      await this.auditLogService.log(
+        AuditAction.APPOINTMENT_BOOKED, patientId, saved.id,
+        `STREAM booked with doctor ${doctorId} on ${date} at ${lockedSlot.startTime}–${lockedSlot.endTime}`,
+      );
+
       return {
         appointmentId: saved.id,
         type: 'STREAM',
@@ -179,6 +187,11 @@ export class AppointmentService {
       });
 
       const saved = await manager.save(appointment);
+
+      await this.auditLogService.log(
+        AuditAction.APPOINTMENT_BOOKED, patientId, saved.id,
+        `WAVE booked with doctor ${doctorId} on ${date} at ${lockedWave.startTime}–${lockedWave.endTime}, token #${tokenNumber}`,
+      );
 
       return {
         appointmentId: saved.id,
@@ -277,6 +290,11 @@ export class AppointmentService {
 
     appointment.status = AppointmentStatus.CANCELLED;
     await this.appointmentRepo.save(appointment);
+
+    await this.auditLogService.log(
+      AuditAction.APPOINTMENT_CANCELLED, patientId, appointment.id,
+      `Cancelled. Was on ${appointment.date} at ${appointment.startTime ?? appointment.waveStartTime}`,
+    );
 
     return {
       appointmentId: appointment.id,
@@ -412,6 +430,11 @@ export class AppointmentService {
       appointment.status = AppointmentStatus.RESCHEDULED;
       await manager.save(appointment);
 
+      await this.auditLogService.log(
+        AuditAction.APPOINTMENT_RESCHEDULED, patientId, appointment.id,
+        `STREAM rescheduled to ${dto.date} at ${lockedSlot.startTime}–${lockedSlot.endTime}`,
+      );
+
       return {
         appointmentId: appointment.id,
         type: 'STREAM',
@@ -488,6 +511,11 @@ export class AppointmentService {
       appointment.tokenNumber = tokenNumber;
       appointment.status = AppointmentStatus.RESCHEDULED;
       await manager.save(appointment);
+
+      await this.auditLogService.log(
+        AuditAction.APPOINTMENT_RESCHEDULED, appointment.patientId, appointment.id,
+        `WAVE rescheduled to ${dto.date} at ${lockedWave.startTime}–${lockedWave.endTime}, token #${tokenNumber}`,
+      );
 
       return {
         appointmentId: appointment.id,
@@ -633,6 +661,11 @@ export class AppointmentService {
     appt.endTime = newSlot.endTime;
     appt.status = AppointmentStatus.RESCHEDULED;
     await this.appointmentRepo.save(appt);
+
+    await this.auditLogService.log(
+      AuditAction.APPOINTMENT_AUTO_MOVED, appt.patientId, appt.id,
+      `STREAM auto-moved to ${newSlot.startTime}–${newSlot.endTime} on ${newSlot.date} due to availability shrink`,
+    );
   }
 
  
@@ -661,8 +694,12 @@ export class AppointmentService {
     appt.tokenNumber = tokenNumber;
     appt.status = AppointmentStatus.RESCHEDULED;
     await this.appointmentRepo.save(appt);
-  }
 
+    await this.auditLogService.log(
+      AuditAction.APPOINTMENT_AUTO_MOVED, appt.patientId, appt.id,
+      `WAVE auto-moved to ${newWave.startTime}–${newWave.endTime} on ${newWave.date}, token #${tokenNumber} due to availability shrink`,
+    );
+  }
   
   private enforce30MinCutoff(
     date: string,
