@@ -1100,7 +1100,6 @@ export class AvailabilityService {
       }
     }
 
-    // No slot found — return null to trigger rollback
     return null;
   }
 
