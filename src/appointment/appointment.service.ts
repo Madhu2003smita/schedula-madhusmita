@@ -133,7 +133,6 @@ export class AppointmentService {
 
       return {
         appointmentId: saved.id,
-        type: 'STREAM',
         status: 'BOOKED',
         doctorId,
         date,
@@ -195,7 +194,6 @@ export class AppointmentService {
 
       return {
         appointmentId: saved.id,
-        type: 'WAVE',
         status: 'BOOKED',
         doctorId,
         date,
@@ -437,7 +435,6 @@ export class AppointmentService {
 
       return {
         appointmentId: appointment.id,
-        type: 'STREAM',
         status: 'RESCHEDULED',
         date: dto.date,
         appointmentTime: `${lockedSlot.startTime} – ${lockedSlot.endTime}`,
@@ -519,7 +516,6 @@ export class AppointmentService {
 
       return {
         appointmentId: appointment.id,
-        type: 'WAVE',
         status: 'RESCHEDULED',
         date: dto.date,
         timeWindow: `${lockedWave.startTime} – ${lockedWave.endTime}`,
@@ -611,7 +607,36 @@ export class AppointmentService {
     return null;
   }
 
-  
+  /**
+   * System-initiated cancellation — used during availability shrink as last resort.
+   * Does NOT enforce 30-min cutoff or ownership check.
+   */
+  async cancelAppointmentBySystem(appointmentId: string): Promise<void> {
+    const appointment = await this.appointmentRepo.findOne({ where: { id: appointmentId } });
+    if (!appointment) return;
+
+    if (appointment.appointmentType === AppointmentType.STREAM && appointment.streamSlotId) {
+      const slot = await this.streamSlotRepo.findOne({ where: { id: appointment.streamSlotId } });
+      if (slot) {
+        slot.bookedCount = Math.max(0, slot.bookedCount - 1);
+        slot.isBooked = slot.bookedCount >= slot.maxCapacity;
+        slot.patientId = null;
+        await this.streamSlotRepo.save(slot);
+      }
+    }
+
+    if (appointment.appointmentType === AppointmentType.WAVE && appointment.waveId) {
+      const wave = await this.waveRepo.findOne({ where: { id: appointment.waveId } });
+      if (wave && wave.bookedCount > 0) {
+        wave.bookedCount -= 1;
+        await this.waveRepo.save(wave);
+      }
+    }
+
+    appointment.status = AppointmentStatus.CANCELLED;
+    await this.appointmentRepo.save(appointment);
+  }
+
   async findAppointmentsBySlotId(streamSlotId: string): Promise<Appointment[]> {
     return this.appointmentRepo.find({
       where: {
@@ -733,7 +758,6 @@ export class AppointmentService {
     if (a.appointmentType === AppointmentType.STREAM) {
       return {
         appointmentId: a.id,
-        type: 'STREAM',
         status: a.status,
         doctorId: a.doctorId,
         patientId: a.patientId,
@@ -744,7 +768,6 @@ export class AppointmentService {
     } else {
       return {
         appointmentId: a.id,
-        type: 'WAVE',
         status: a.status,
         doctorId: a.doctorId,
         patientId: a.patientId,

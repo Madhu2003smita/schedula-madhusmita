@@ -17,14 +17,12 @@ import { AppointmentService } from './appointment.service';
 import { BookAppointmentDto } from './dto/book-appointment.dto';
 import { RescheduleAppointmentDto } from './dto/reschedule-appointment.dto';
 
-
-@Controller('appointment')
+@Controller('patient/appointment')
 @UseGuards(JwtAuthGuard, RolesGuard)
 @Roles('PATIENT')
 export class AppointmentController {
   constructor(private readonly appointmentService: AppointmentService) {}
 
-  
   @Post()
   @HttpCode(HttpStatus.CREATED)
   bookAppointment(@Req() req: any, @Body() dto: BookAppointmentDto) {
@@ -41,10 +39,6 @@ export class AppointmentController {
     return this.appointmentService.cancelAppointment(req.user.id, id);
   }
 
-  /**
-   * PATCH /appointment/:id/reschedule
-   * Patient reschedules their appointment to a new slot
-   */
   @Patch(':id/reschedule')
   rescheduleAppointment(
     @Req() req: any,

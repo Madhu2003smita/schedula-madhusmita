@@ -133,12 +133,24 @@ export class AvailabilityService {
     const newStartMin = this.timeToMinutes(newStart);
     const newEndMin   = this.timeToMinutes(newEnd);
 
-    const isShrink =
-      newStartMin > oldStartMin || newEndMin < oldEndMin;
-    const isExpand =
-      newStartMin < oldStartMin || newEndMin > oldEndMin;
+    const isShrink = newStartMin > oldStartMin || newEndMin < oldEndMin;
+    const isExpand = newStartMin < oldStartMin || newEndMin > oldEndMin;
 
-    // Save the updated availability first
+    // ── 2-hour buffer: only allow expand/shrink if next occurrence is > 2 hours away
+    if (isShrink || isExpand) {
+      const nextDate = this.getFutureDatesForDayOfWeek(newDay, 7)[0];
+      if (nextDate) {
+        const sessionStart = new Date(`${nextDate}T${availability.startTime.substring(0, 5)}:00`);
+        const twoHoursFromNow = new Date(Date.now() + 2 * 60 * 60 * 1000);
+        if (sessionStart <= twoHoursFromNow) {
+          throw new BadRequestException(
+            'Cannot modify availability within 2 hours of the next scheduled session',
+          );
+        }
+      }
+    }
+
+    // Save the updated availability
     Object.assign(availability, dto);
     const saved = await this.recurringRepo.save(availability);
     const formatted = this.formatRecurringAvailability(saved);
@@ -175,7 +187,7 @@ export class AvailabilityService {
     if (isShrink) {
       return this.handleShrinkForRecurring(doctorId, newDay, availability.schedulingType, newStart, newEnd, formatted, saved.id);
     }
-    // No time change (e.g. only maxCapacity or schedulingType changed)
+
     return { ...formatted, elasticAction: 'NO_TIME_CHANGE' };
   }
 
@@ -189,7 +201,7 @@ export class AvailabilityService {
     formattedAvailability: RecurringAvailabilityResponse,
     availabilityId: string,
   ): Promise<object> {
-    const futureDates = this.getFutureDatesForDayOfWeek(dayOfWeek, 60);
+    const futureDates = this.getFutureDatesForDayOfWeek(dayOfWeek, 21); // next 3 occurrences
 
     return this.dataSource.transaction(async () => {
       const affectedAppointments: object[] = [];
@@ -313,6 +325,17 @@ export class AvailabilityService {
 
     const isShrink = newStartMin > oldStartMin || newEndMin < oldEndMin;
     const isExpand = newStartMin < oldStartMin || newEndMin > oldEndMin;
+
+    // ── 2-hour buffer: only allow if session is > 2 hours away ───────────────
+    if (isShrink || isExpand) {
+      const sessionStart = new Date(`${availability.date}T${availability.startTime.substring(0, 5)}:00`);
+      const twoHoursFromNow = new Date(Date.now() + 2 * 60 * 60 * 1000);
+      if (sessionStart <= twoHoursFromNow) {
+        throw new BadRequestException(
+          'Cannot modify availability within 2 hours of the scheduled session',
+        );
+      }
+    }
 
     Object.assign(availability, dto);
     const saved = await this.customRepo.save(availability);
@@ -871,7 +894,7 @@ export class AvailabilityService {
     newStartMin: number,
     newEndMin: number,
   ): Promise<{ totalNew: number; affectedDates: string[] }> {
-    const futureDates = this.getFutureDatesForDayOfWeek(dayOfWeek, 60);
+    const futureDates = this.getFutureDatesForDayOfWeek(dayOfWeek, 21); // next 3 occurrences
     let totalNew = 0;
     const affectedDates: string[] = [];
 
@@ -1005,6 +1028,12 @@ export class AvailabilityService {
     }
   }
 
+  /**
+   * Improved shrink flow for STREAM:
+   * 1. Find nearest available slot on same date within new window
+   * 2. If not found, search next 2 future dates with same day-of-week
+   * 3. If still not found, cancel as last resort
+   */
   private async tryAutoMoveStream(
     appt: Appointment,
     doctorId: string,
@@ -1015,20 +1044,27 @@ export class AvailabilityService {
     const newStartMin = this.timeToMinutes(newStart);
     const newEndMin   = this.timeToMinutes(newEnd);
 
+    // Step 1 — find nearest slot on SAME date within new window
     const candidates = await this.streamSlotRepo.find({
       where: { doctorId, date },
       order: { startTime: 'ASC' },
     });
 
-    for (const slot of candidates) {
-      if (slot.id === appt.streamSlotId) continue; // skip current slot
-      if (this.timeToMinutes(slot.startTime) < newStartMin) continue;
-      if (this.timeToMinutes(slot.endTime)   > newEndMin)   continue;
-      if (slot.bookedCount >= slot.maxCapacity) continue;
+    // Sort by proximity to original start time
+    const apptStartMin = this.timeToMinutes((appt.startTime ?? '00:00').substring(0, 5));
+    const sorted = candidates
+      .filter((s) => s.id !== appt.streamSlotId)
+      .filter((s) => this.timeToMinutes(s.startTime.substring(0, 5)) >= newStartMin)
+      .filter((s) => this.timeToMinutes(s.endTime.substring(0, 5))   <= newEndMin)
+      .filter((s) => s.bookedCount < s.maxCapacity)
+      .sort((a, b) =>
+        Math.abs(this.timeToMinutes(a.startTime.substring(0, 5)) - apptStartMin) -
+        Math.abs(this.timeToMinutes(b.startTime.substring(0, 5)) - apptStartMin),
+      );
 
-      // Move appointment to this slot
+    if (sorted.length > 0) {
+      const slot = sorted[0];
       await this.appointmentService.moveAppointmentToSlot(appt.id, slot);
-
       return {
         appointmentId: appt.id,
         patientId: appt.patientId,
@@ -1039,13 +1075,36 @@ export class AvailabilityService {
       };
     }
 
+    // Step 2 — search next 14 days (any date, not just same day-of-week)
+    for (let i = 1; i <= 14; i++) {
+      const d = new Date(date);
+      d.setDate(d.getDate() + i);
+      const futureDate = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
+
+      const futureSlots = await this.streamSlotRepo.find({
+        where: { doctorId, date: futureDate },
+        order: { startTime: 'ASC' },
+      });
+      const available = futureSlots.find((s) => s.bookedCount < s.maxCapacity);
+      if (available) {
+        await this.appointmentService.moveAppointmentToSlot(appt.id, available);
+        return {
+          appointmentId: appt.id,
+          patientId: appt.patientId,
+          originalDate: date,
+          newDate: futureDate,
+          newSlotId: available.id,
+          newTime: `${available.startTime} – ${available.endTime}`,
+          action: 'AUTO_MOVED_TO_FUTURE_DATE',
+        };
+      }
+    }
+
+    // No slot found — return null to trigger rollback
     return null;
   }
 
-  /**
-   * Tries to move a WAVE appointment to another available wave on the same
-   * date that falls within the new availability window.
-   */
+
   private async tryAutoMoveWave(
     appt: Appointment,
     doctorId: string,
@@ -1056,20 +1115,27 @@ export class AvailabilityService {
     const newStartMin = this.timeToMinutes(newStart);
     const newEndMin   = this.timeToMinutes(newEnd);
 
+    // Step 1 — find nearest wave on SAME date within new window
     const candidates = await this.waveRepo.find({
       where: { doctorId, date },
       order: { startTime: 'ASC' },
     });
 
-    for (const wave of candidates) {
-      if (wave.id === appt.waveId) continue;
-      if (this.timeToMinutes(wave.startTime) < newStartMin) continue;
-      if (this.timeToMinutes(wave.endTime)   > newEndMin)   continue;
-      if (wave.bookedCount >= wave.maxPatients) continue;
+    // Sort by proximity to original wave start time
+    const apptWaveStartMin = this.timeToMinutes((appt.waveStartTime ?? '00:00').substring(0, 5));
+    const sorted = candidates
+      .filter((w) => w.id !== appt.waveId)
+      .filter((w) => this.timeToMinutes(w.startTime.substring(0, 5)) >= newStartMin)
+      .filter((w) => this.timeToMinutes(w.endTime.substring(0, 5))   <= newEndMin)
+      .filter((w) => w.bookedCount < w.maxPatients)
+      .sort((a, b) =>
+        Math.abs(this.timeToMinutes(a.startTime.substring(0, 5)) - apptWaveStartMin) -
+        Math.abs(this.timeToMinutes(b.startTime.substring(0, 5)) - apptWaveStartMin),
+      );
 
-      // Move appointment to this wave
+    if (sorted.length > 0) {
+      const wave = sorted[0];
       await this.appointmentService.moveAppointmentToWave(appt.id, wave);
-
       return {
         appointmentId: appt.id,
         patientId: appt.patientId,
@@ -1080,6 +1146,34 @@ export class AvailabilityService {
       };
     }
 
+    // Step 2 — search next 2 future dates
+    const dayOfWeek = this.getDayOfWeek(date);
+    // Step 2 — search next 14 days (any date, nearest first)
+    for (let i = 1; i <= 14; i++) {
+      const d = new Date(date);
+      d.setDate(d.getDate() + i);
+      const futureDate = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
+
+      const futureWaves = await this.waveRepo.find({
+        where: { doctorId, date: futureDate },
+        order: { startTime: 'ASC' },
+      });
+      const available = futureWaves.find((w) => w.bookedCount < w.maxPatients);
+      if (available) {
+        await this.appointmentService.moveAppointmentToWave(appt.id, available);
+        return {
+          appointmentId: appt.id,
+          patientId: appt.patientId,
+          originalDate: date,
+          newDate: futureDate,
+          newWaveId: available.id,
+          newTimeWindow: `${available.startTime} – ${available.endTime}`,
+          action: 'AUTO_MOVED_TO_FUTURE_DATE',
+        };
+      }
+    }
+
+    // No wave found — return null to trigger rollback
     return null;
   }
 
