@@ -42,4 +42,10 @@ export class DoctorService {
     Object.assign(doctor, dto);
     return this.doctorRepository.save(doctor);
   }
+
+  async getAllDoctors(): Promise<Doctor[]> {
+    return this.doctorRepository.find({
+      order: { userId: 'ASC' },
+    });
+  }
 }

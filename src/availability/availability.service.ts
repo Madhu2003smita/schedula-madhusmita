@@ -5,9 +5,11 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { In, Repository } from 'typeorm';
+import { DataSource, In, Repository } from 'typeorm';
 import { AppointmentService } from '../appointment/appointment.service';
 import { Appointment, AppointmentStatus, AppointmentType } from '../appointment/entities/appointment.entity';
+import { AuditAction } from '../audit-log/audit-log.entity';
+import { AuditLogService } from '../audit-log/audit-log.service';
 import { Booking, BookingType } from '../scheduling/entities/booking.entity';
 import { StreamSlot } from '../scheduling/entities/stream-slot.entity';
 import { Wave } from '../scheduling/entities/wave.entity';
@@ -44,6 +46,8 @@ export class AvailabilityService {
     @InjectRepository(Booking)
     private readonly bookingRepo: Repository<Booking>,
     private readonly appointmentService: AppointmentService,
+    private readonly auditLogService: AuditLogService,
+    private readonly dataSource: DataSource,
   ) {}
 
   
@@ -129,30 +133,61 @@ export class AvailabilityService {
     const newStartMin = this.timeToMinutes(newStart);
     const newEndMin   = this.timeToMinutes(newEnd);
 
-    const isShrink =
-      newStartMin > oldStartMin || newEndMin < oldEndMin;
-    const isExpand =
-      newStartMin < oldStartMin || newEndMin > oldEndMin;
+    const isShrink = newStartMin > oldStartMin || newEndMin < oldEndMin;
+    const isExpand = newStartMin < oldStartMin || newEndMin > oldEndMin;
 
-    // Save the updated availability first
+    // ── 2-hour buffer: only allow expand/shrink if next occurrence is > 2 hours away
+    if (isShrink || isExpand) {
+      const nextDate = this.getFutureDatesForDayOfWeek(newDay, 7)[0];
+      if (nextDate) {
+        const sessionStart = new Date(`${nextDate}T${availability.startTime.substring(0, 5)}:00`);
+        const twoHoursFromNow = new Date(Date.now() + 2 * 60 * 60 * 1000);
+        if (sessionStart <= twoHoursFromNow) {
+          throw new BadRequestException(
+            'Cannot modify availability within 2 hours of the next scheduled session',
+          );
+        }
+      }
+    }
+
+    // Save the updated availability
     Object.assign(availability, dto);
     const saved = await this.recurringRepo.save(availability);
     const formatted = this.formatRecurringAvailability(saved);
 
     // ── EXPAND ────────────────────────────────────────────────────────────────
     if (isExpand && !isShrink) {
+      const newSlots = await this.expandSlotsForRecurring(
+        doctorId,
+        newDay,
+        availability.schedulingType,
+        availability.slotDuration,
+        availability.maxCapacity ?? 1,
+        oldStartMin,
+        oldEndMin,
+        newStartMin,
+        newEndMin,
+      );
+
+      await this.auditLogService.log(
+        AuditAction.AVAILABILITY_EXPANDED, doctorId, saved.id,
+        `Recurring availability expanded: ${newDay} window now ${newStart}–${newEnd}, ${newSlots.totalNew} new slot(s) on ${newSlots.affectedDates.length} date(s)`,
+      );
+
       return {
         ...formatted,
         elasticAction: 'EXPAND',
-        message: 'Availability expanded. Regenerate slots for affected dates to open new booking windows.',
+        newSlotsGenerated: newSlots.totalNew,
+        affectedDates: newSlots.affectedDates,
+        message: `Availability expanded. ${newSlots.totalNew} new slot(s) generated across ${newSlots.affectedDates.length} date(s).`,
       };
     }
 
     // ── SHRINK ────────────────────────────────────────────────────────────────
     if (isShrink) {
-      return this.handleShrinkForRecurring(doctorId, newDay, availability.schedulingType, newStart, newEnd, formatted);
+      return this.handleShrinkForRecurring(doctorId, newDay, availability.schedulingType, newStart, newEnd, formatted, saved.id);
     }
-    // No time change (e.g. only maxCapacity or schedulingType changed)
+
     return { ...formatted, elasticAction: 'NO_TIME_CHANGE' };
   }
 
@@ -164,96 +199,102 @@ export class AvailabilityService {
     newStart: string,
     newEnd: string,
     formattedAvailability: RecurringAvailabilityResponse,
+    availabilityId: string,
   ): Promise<object> {
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
+    const futureDates = this.getFutureDatesForDayOfWeek(dayOfWeek, 21); // next 3 occurrences
 
-    // Collect all future dates matching this dayOfWeek
-    const futureDates = await this.getFutureDatesForDayOfWeek(dayOfWeek, 60);
+    return this.dataSource.transaction(async () => {
+      const affectedAppointments: object[] = [];
+      const autoMoved: object[] = [];
+      const needsReschedule: object[] = [];
 
-    const affectedAppointments: object[] = [];
-    const autoMoved: object[] = [];
-    const needsReschedule: object[] = [];
+      for (const date of futureDates) {
+        if (schedulingType === SchedulingType.STREAM) {
+          const slots = await this.streamSlotRepo.find({ where: { doctorId, date } });
+          for (const slot of slots) {
+            const newStartMin = this.timeToMinutes(newStart);
+            const newEndMin   = this.timeToMinutes(newEnd);
+            const isOutside   =
+              this.timeToMinutes(slot.startTime) < newStartMin ||
+              this.timeToMinutes(slot.endTime)   > newEndMin;
+            if (!isOutside) continue;
 
-    for (const date of futureDates) {
-      if (schedulingType === SchedulingType.STREAM) {
-        // Find stream slots outside the new window
-        const slots = await this.streamSlotRepo.find({ where: { doctorId, date } });
-        for (const slot of slots) {
-          const slotStartMin = this.timeToMinutes(slot.startTime);
-          const slotEndMin   = this.timeToMinutes(slot.endTime);
-          const newStartMin  = this.timeToMinutes(newStart);
-          const newEndMin    = this.timeToMinutes(newEnd);
-          const isOutside    = slotStartMin < newStartMin || slotEndMin > newEndMin;
-
-          if (!isOutside) continue;
-
-          // Find booked appointments on this slot
-          const appts = await this.appointmentService.findAppointmentsBySlotId(slot.id);
-          for (const appt of appts) {
-            affectedAppointments.push(appt);
-            // Try to find another available slot on the same date inside the new window
-            const moved = await this.tryAutoMoveStream(appt, doctorId, date, newStart, newEnd);
-            if (moved) {
-              autoMoved.push(moved);
-            } else {
-              needsReschedule.push({
-                appointmentId: appt.id,
-                patientId: appt.patientId,
-                date,
-                reason: 'No available slot within the new availability window',
-                action: 'NEEDS_RESCHEDULE',
-              });
+            const appts = await this.appointmentService.findAppointmentsBySlotId(slot.id);
+            for (const appt of appts) {
+              affectedAppointments.push(appt);
+              const moved = await this.tryAutoMoveStream(appt, doctorId, date, newStart, newEnd);
+              if (moved) {
+                autoMoved.push(moved);
+              } else {
+                needsReschedule.push({
+                  appointmentId: appt.id,
+                  patientId: appt.patientId,
+                  date,
+                  reason: 'No available slot within the new availability window',
+                  action: 'NEEDS_RESCHEDULE',
+                });
+              }
             }
           }
-        }
-      } else {
-        // WAVE: find waves outside the new window
-        const waves = await this.waveRepo.find({ where: { doctorId, date } });
-        for (const wave of waves) {
-          const waveStartMin = this.timeToMinutes(wave.startTime);
-          const waveEndMin   = this.timeToMinutes(wave.endTime);
-          const newStartMin  = this.timeToMinutes(newStart);
-          const newEndMin    = this.timeToMinutes(newEnd);
-          const isOutside    = waveStartMin < newStartMin || waveEndMin > newEndMin;
+        } else {
+          const waves = await this.waveRepo.find({ where: { doctorId, date } });
+          for (const wave of waves) {
+            const newStartMin = this.timeToMinutes(newStart);
+            const newEndMin   = this.timeToMinutes(newEnd);
+            const isOutside   =
+              this.timeToMinutes(wave.startTime) < newStartMin ||
+              this.timeToMinutes(wave.endTime)   > newEndMin;
+            if (!isOutside) continue;
 
-          if (!isOutside) continue;
-
-          const appts = await this.appointmentService.findAppointmentsByWaveId(wave.id);
-          for (const appt of appts) {
-            affectedAppointments.push(appt);
-            const moved = await this.tryAutoMoveWave(appt, doctorId, date, newStart, newEnd);
-            if (moved) {
-              autoMoved.push(moved);
-            } else {
-              needsReschedule.push({
-                appointmentId: appt.id,
-                patientId: appt.patientId,
-                date,
-                reason: 'No available wave within the new availability window',
-                action: 'NEEDS_RESCHEDULE',
-              });
+            const appts = await this.appointmentService.findAppointmentsByWaveId(wave.id);
+            for (const appt of appts) {
+              affectedAppointments.push(appt);
+              const moved = await this.tryAutoMoveWave(appt, doctorId, date, newStart, newEnd);
+              if (moved) {
+                autoMoved.push(moved);
+              } else {
+                needsReschedule.push({
+                  appointmentId: appt.id,
+                  patientId: appt.patientId,
+                  date,
+                  reason: 'No available wave within the new availability window',
+                  action: 'NEEDS_RESCHEDULE',
+                });
+              }
             }
           }
         }
       }
-    }
 
-    return {
-      ...formattedAvailability,
-      elasticAction: 'SHRINK',
-      summary: {
-        totalAffected: affectedAppointments.length,
-        autoMoved: autoMoved.length,
-        needsReschedule: needsReschedule.length,
-      },
-      autoMoved,
-      needsReschedule,
-      message:
-        affectedAppointments.length === 0
-          ? 'Availability shrunk. No existing appointments were affected.'
-          : `Availability shrunk. ${autoMoved.length} appointment(s) auto-moved, ${needsReschedule.length} need manual reschedule.`,
-    };
+      // ── Rollback if any appointment cannot be moved ────────────────────────
+      if (needsReschedule.length > 0) {
+        throw new ConflictException({
+          message: `Availability shrink failed: ${needsReschedule.length} appointment(s) could not be automatically rescheduled. Availability change has been rolled back.`,
+          blockedAppointments: needsReschedule,
+        });
+      }
+
+      // ── All moved successfully — log and return ────────────────────────────
+      await this.auditLogService.log(
+        AuditAction.AVAILABILITY_SHRUNK, doctorId, availabilityId,
+        `Recurring availability shrunk to ${newStart}–${newEnd} on ${dayOfWeek}. ${autoMoved.length} appointment(s) auto-moved.`,
+      );
+
+      return {
+        ...formattedAvailability,
+        elasticAction: 'SHRINK',
+        summary: {
+          totalAffected: affectedAppointments.length,
+          autoMoved: autoMoved.length,
+          needsReschedule: 0,
+        },
+        autoMoved,
+        message:
+          affectedAppointments.length === 0
+            ? 'Availability shrunk. No existing appointments were affected.'
+            : `Availability shrunk. ${autoMoved.length} appointment(s) auto-moved successfully.`,
+      };
+    });
   }
 
   /**
@@ -285,20 +326,49 @@ export class AvailabilityService {
     const isShrink = newStartMin > oldStartMin || newEndMin < oldEndMin;
     const isExpand = newStartMin < oldStartMin || newEndMin > oldEndMin;
 
+    // ── 2-hour buffer: only allow if session is > 2 hours away ───────────────
+    if (isShrink || isExpand) {
+      const sessionStart = new Date(`${availability.date}T${availability.startTime.substring(0, 5)}:00`);
+      const twoHoursFromNow = new Date(Date.now() + 2 * 60 * 60 * 1000);
+      if (sessionStart <= twoHoursFromNow) {
+        throw new BadRequestException(
+          'Cannot modify availability within 2 hours of the scheduled session',
+        );
+      }
+    }
+
     Object.assign(availability, dto);
     const saved = await this.customRepo.save(availability);
     const formatted = this.formatCustomAvailability(saved);
 
     if (isExpand && !isShrink) {
+      const newSlots = await this.expandSlotsForCustom(
+        doctorId,
+        availability.date,
+        availability.schedulingType,
+        availability.slotDuration,
+        availability.maxCapacity ?? 1,
+        oldStartMin,
+        oldEndMin,
+        newStartMin,
+        newEndMin,
+      );
+
+      await this.auditLogService.log(
+        AuditAction.AVAILABILITY_EXPANDED, doctorId, saved.id,
+        `Custom availability expanded: ${availability.date} window now ${newStart}–${newEnd}, ${newSlots.totalNew} new slot(s)`,
+      );
+
       return {
         ...formatted,
         elasticAction: 'EXPAND',
-        message: 'Availability expanded. Regenerate slots for this date to open new booking windows.',
+        newSlotsGenerated: newSlots.totalNew,
+        message: `Availability expanded. ${newSlots.totalNew} new slot(s) generated for ${availability.date}.`,
       };
     }
 
     if (isShrink) {
-      return this.handleShrinkForCustom(doctorId, availability.date, availability.schedulingType, newStart, newEnd, formatted);
+      return this.handleShrinkForCustom(doctorId, availability.date, availability.schedulingType, newStart, newEnd, formatted, saved.id);
     }
 
     return { ...formatted, elasticAction: 'NO_TIME_CHANGE' };
@@ -311,78 +381,94 @@ export class AvailabilityService {
     newStart: string,
     newEnd: string,
     formattedAvailability: CustomAvailabilityResponse,
+    availabilityId: string,
   ): Promise<object> {
-    const affectedAppointments: object[] = [];
-    const autoMoved: object[] = [];
-    const needsReschedule: object[] = [];
+    return this.dataSource.transaction(async () => {
+      const affectedAppointments: object[] = [];
+      const autoMoved: object[] = [];
+      const needsReschedule: object[] = [];
 
-    if (schedulingType === SchedulingType.STREAM) {
-      const slots = await this.streamSlotRepo.find({ where: { doctorId, date } });
-      for (const slot of slots) {
-        const isOutside =
-          this.timeToMinutes(slot.startTime) < this.timeToMinutes(newStart) ||
-          this.timeToMinutes(slot.endTime)   > this.timeToMinutes(newEnd);
-        if (!isOutside) continue;
+      if (schedulingType === SchedulingType.STREAM) {
+        const slots = await this.streamSlotRepo.find({ where: { doctorId, date } });
+        for (const slot of slots) {
+          const isOutside =
+            this.timeToMinutes(slot.startTime) < this.timeToMinutes(newStart) ||
+            this.timeToMinutes(slot.endTime)   > this.timeToMinutes(newEnd);
+          if (!isOutside) continue;
 
-        const appts = await this.appointmentService.findAppointmentsBySlotId(slot.id);
-        for (const appt of appts) {
-          affectedAppointments.push(appt);
-          const moved = await this.tryAutoMoveStream(appt, doctorId, date, newStart, newEnd);
-          if (moved) {
-            autoMoved.push(moved);
-          } else {
-            needsReschedule.push({
-              appointmentId: appt.id,
-              patientId: appt.patientId,
-              date,
-              reason: 'No available slot within new availability window',
-              action: 'NEEDS_RESCHEDULE',
-            });
+          const appts = await this.appointmentService.findAppointmentsBySlotId(slot.id);
+          for (const appt of appts) {
+            affectedAppointments.push(appt);
+            const moved = await this.tryAutoMoveStream(appt, doctorId, date, newStart, newEnd);
+            if (moved) {
+              autoMoved.push(moved);
+            } else {
+              needsReschedule.push({
+                appointmentId: appt.id,
+                patientId: appt.patientId,
+                date,
+                reason: 'No available slot within new availability window',
+                action: 'NEEDS_RESCHEDULE',
+              });
+            }
+          }
+        }
+      } else {
+        const waves = await this.waveRepo.find({ where: { doctorId, date } });
+        for (const wave of waves) {
+          const isOutside =
+            this.timeToMinutes(wave.startTime) < this.timeToMinutes(newStart) ||
+            this.timeToMinutes(wave.endTime)   > this.timeToMinutes(newEnd);
+          if (!isOutside) continue;
+
+          const appts = await this.appointmentService.findAppointmentsByWaveId(wave.id);
+          for (const appt of appts) {
+            affectedAppointments.push(appt);
+            const moved = await this.tryAutoMoveWave(appt, doctorId, date, newStart, newEnd);
+            if (moved) {
+              autoMoved.push(moved);
+            } else {
+              needsReschedule.push({
+                appointmentId: appt.id,
+                patientId: appt.patientId,
+                date,
+                reason: 'No available wave within new availability window',
+                action: 'NEEDS_RESCHEDULE',
+              });
+            }
           }
         }
       }
-    } else {
-      const waves = await this.waveRepo.find({ where: { doctorId, date } });
-      for (const wave of waves) {
-        const isOutside =
-          this.timeToMinutes(wave.startTime) < this.timeToMinutes(newStart) ||
-          this.timeToMinutes(wave.endTime)   > this.timeToMinutes(newEnd);
-        if (!isOutside) continue;
 
-        const appts = await this.appointmentService.findAppointmentsByWaveId(wave.id);
-        for (const appt of appts) {
-          affectedAppointments.push(appt);
-          const moved = await this.tryAutoMoveWave(appt, doctorId, date, newStart, newEnd);
-          if (moved) {
-            autoMoved.push(moved);
-          } else {
-            needsReschedule.push({
-              appointmentId: appt.id,
-              patientId: appt.patientId,
-              date,
-              reason: 'No available wave within new availability window',
-              action: 'NEEDS_RESCHEDULE',
-            });
-          }
-        }
+      // ── Rollback if any appointment cannot be moved ────────────────────────
+      if (needsReschedule.length > 0) {
+        throw new ConflictException({
+          message: `Availability shrink failed: ${needsReschedule.length} appointment(s) could not be automatically rescheduled. Availability change has been rolled back.`,
+          blockedAppointments: needsReschedule,
+        });
       }
-    }
 
-    return {
-      ...formattedAvailability,
-      elasticAction: 'SHRINK',
-      summary: {
-        totalAffected: affectedAppointments.length,
-        autoMoved: autoMoved.length,
-        needsReschedule: needsReschedule.length,
-      },
-      autoMoved,
-      needsReschedule,
-      message:
-        affectedAppointments.length === 0
-          ? 'Availability shrunk. No existing appointments were affected.'
-          : `Availability shrunk. ${autoMoved.length} appointment(s) auto-moved, ${needsReschedule.length} need manual reschedule.`,
-    };
+      // ── All moved successfully — log and return ────────────────────────────
+      await this.auditLogService.log(
+        AuditAction.AVAILABILITY_SHRUNK, doctorId, availabilityId,
+        `Custom availability shrunk to ${newStart}–${newEnd} on ${date}. ${autoMoved.length} appointment(s) auto-moved.`,
+      );
+
+      return {
+        ...formattedAvailability,
+        elasticAction: 'SHRINK',
+        summary: {
+          totalAffected: affectedAppointments.length,
+          autoMoved: autoMoved.length,
+          needsReschedule: 0,
+        },
+        autoMoved,
+        message:
+          affectedAppointments.length === 0
+            ? 'Availability shrunk. No existing appointments were affected.'
+            : `Availability shrunk. ${autoMoved.length} appointment(s) auto-moved successfully.`,
+      };
+    });
   }
 
   async deleteRecurring(doctorId: string, id: string) {
@@ -786,7 +872,168 @@ export class AvailabilityService {
 
 
 
- 
+  // ─── Elastic Scheduling Helpers ─────────────────────────────────────────────
+
+  /**
+   * Generates new slots for the EXPANDED portion of a recurring availability
+   * across all future dates matching the dayOfWeek.
+   *
+   * Only the newly added time windows are generated:
+   *  - If start moved earlier:  generate slots from newStart to oldStart
+   *  - If end moved later:      generate slots from oldEnd to newEnd
+   * Existing slots in the original window are NOT touched.
+   */
+  private async expandSlotsForRecurring(
+    doctorId: string,
+    dayOfWeek: DayOfWeek,
+    schedulingType: SchedulingType,
+    slotDuration: number | null,
+    maxCapacity: number,
+    oldStartMin: number,
+    oldEndMin: number,
+    newStartMin: number,
+    newEndMin: number,
+  ): Promise<{ totalNew: number; affectedDates: string[] }> {
+    const futureDates = this.getFutureDatesForDayOfWeek(dayOfWeek, 21); // next 3 occurrences
+    let totalNew = 0;
+    const affectedDates: string[] = [];
+
+    for (const date of futureDates) {
+      const count = await this.generateExpandedSlots(
+        doctorId, date, schedulingType, slotDuration, maxCapacity,
+        oldStartMin, oldEndMin, newStartMin, newEndMin,
+      );
+      if (count > 0) {
+        totalNew += count;
+        affectedDates.push(date);
+      }
+    }
+
+    return { totalNew, affectedDates };
+  }
+
+  /**
+   * Generates new slots for the EXPANDED portion of a custom availability
+   * for a specific date only.
+   */
+  private async expandSlotsForCustom(
+    doctorId: string,
+    date: string,
+    schedulingType: SchedulingType,
+    slotDuration: number | null,
+    maxCapacity: number,
+    oldStartMin: number,
+    oldEndMin: number,
+    newStartMin: number,
+    newEndMin: number,
+  ): Promise<{ totalNew: number }> {
+    const count = await this.generateExpandedSlots(
+      doctorId, date, schedulingType, slotDuration, maxCapacity,
+      oldStartMin, oldEndMin, newStartMin, newEndMin,
+    );
+    return { totalNew: count };
+  }
+
+  /**
+   * Core logic: generates slots only for the newly added time portions.
+   * Skips dates where no slots were previously generated (no expansion needed).
+   * Returns the number of new slots/waves created.
+   */
+  private async generateExpandedSlots(
+    doctorId: string,
+    date: string,
+    schedulingType: SchedulingType,
+    slotDuration: number | null,
+    maxCapacity: number,
+    oldStartMin: number,
+    oldEndMin: number,
+    newStartMin: number,
+    newEndMin: number,
+  ): Promise<number> {
+    if (schedulingType === SchedulingType.STREAM) {
+      const existing = await this.streamSlotRepo.find({ where: { doctorId, date } });
+      if (existing.length === 0) return 0; // no slots yet on this date — skip
+
+      // STREAM is one single slot covering the whole session.
+      // Extend the existing slot's time boundaries to match the new window.
+      let changed = false;
+      for (const slot of existing) {
+        const slotStart = this.timeToMinutes(slot.startTime.substring(0, 5));
+        const slotEnd   = this.timeToMinutes(slot.endTime.substring(0, 5));
+        if (slotStart === oldStartMin && newStartMin < oldStartMin) {
+          slot.startTime = this.minutesToTime(newStartMin);
+          changed = true;
+        }
+        if (slotEnd === oldEndMin && newEndMin > oldEndMin) {
+          slot.endTime = this.minutesToTime(newEndMin);
+          changed = true;
+        }
+        if (changed) await this.streamSlotRepo.save(slot);
+      }
+      return changed ? 1 : 0;
+
+    } else {
+      // WAVE: generate new wave records only in the newly added time range(s)
+      if (!slotDuration || slotDuration <= 0) return 0;
+
+      const existingWaves = await this.waveRepo.find({ where: { doctorId, date } });
+      if (existingWaves.length === 0) return 0; // no waves yet on this date — skip
+
+      const newWaves: Wave[] = [];
+
+      // Newly added time BEFORE the old start (start moved earlier)
+      if (newStartMin < oldStartMin) {
+        let current = newStartMin;
+        while (current + slotDuration <= oldStartMin) {
+          const startStr = this.minutesToTime(current);
+          const alreadyExists = existingWaves.some(
+            (w) => w.startTime.substring(0, 5) === startStr,
+          );
+          if (!alreadyExists) {
+            newWaves.push(this.waveRepo.create({
+              doctorId, date,
+              startTime: startStr,
+              endTime: this.minutesToTime(current + slotDuration),
+              maxPatients: maxCapacity,
+              bookedCount: 0,
+            }));
+          }
+          current += slotDuration;
+        }
+      }
+
+      // Newly added time AFTER the old end (end moved later)
+      if (newEndMin > oldEndMin) {
+        let current = oldEndMin;
+        while (current + slotDuration <= newEndMin) {
+          const startStr = this.minutesToTime(current);
+          const alreadyExists = existingWaves.some(
+            (w) => w.startTime.substring(0, 5) === startStr,
+          );
+          if (!alreadyExists) {
+            newWaves.push(this.waveRepo.create({
+              doctorId, date,
+              startTime: startStr,
+              endTime: this.minutesToTime(current + slotDuration),
+              maxPatients: maxCapacity,
+              bookedCount: 0,
+            }));
+          }
+          current += slotDuration;
+        }
+      }
+
+      if (newWaves.length > 0) await this.waveRepo.save(newWaves);
+      return newWaves.length;
+    }
+  }
+
+  /**
+   * Improved shrink flow for STREAM:
+   * 1. Find nearest available slot on same date within new window
+   * 2. If not found, search next 2 future dates with same day-of-week
+   * 3. If still not found, cancel as last resort
+   */
   private async tryAutoMoveStream(
     appt: Appointment,
     doctorId: string,
@@ -797,20 +1044,27 @@ export class AvailabilityService {
     const newStartMin = this.timeToMinutes(newStart);
     const newEndMin   = this.timeToMinutes(newEnd);
 
+    // Step 1 — find nearest slot on SAME date within new window
     const candidates = await this.streamSlotRepo.find({
       where: { doctorId, date },
       order: { startTime: 'ASC' },
     });
 
-    for (const slot of candidates) {
-      if (slot.id === appt.streamSlotId) continue; // skip current slot
-      if (this.timeToMinutes(slot.startTime) < newStartMin) continue;
-      if (this.timeToMinutes(slot.endTime)   > newEndMin)   continue;
-      if (slot.bookedCount >= slot.maxCapacity) continue;
+    // Sort by proximity to original start time
+    const apptStartMin = this.timeToMinutes((appt.startTime ?? '00:00').substring(0, 5));
+    const sorted = candidates
+      .filter((s) => s.id !== appt.streamSlotId)
+      .filter((s) => this.timeToMinutes(s.startTime.substring(0, 5)) >= newStartMin)
+      .filter((s) => this.timeToMinutes(s.endTime.substring(0, 5))   <= newEndMin)
+      .filter((s) => s.bookedCount < s.maxCapacity)
+      .sort((a, b) =>
+        Math.abs(this.timeToMinutes(a.startTime.substring(0, 5)) - apptStartMin) -
+        Math.abs(this.timeToMinutes(b.startTime.substring(0, 5)) - apptStartMin),
+      );
 
-      // Move appointment to this slot
+    if (sorted.length > 0) {
+      const slot = sorted[0];
       await this.appointmentService.moveAppointmentToSlot(appt.id, slot);
-
       return {
         appointmentId: appt.id,
         patientId: appt.patientId,
@@ -821,13 +1075,35 @@ export class AvailabilityService {
       };
     }
 
+    // Step 2 — search next 14 days (any date, not just same day-of-week)
+    for (let i = 1; i <= 14; i++) {
+      const d = new Date(date);
+      d.setDate(d.getDate() + i);
+      const futureDate = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
+
+      const futureSlots = await this.streamSlotRepo.find({
+        where: { doctorId, date: futureDate },
+        order: { startTime: 'ASC' },
+      });
+      const available = futureSlots.find((s) => s.bookedCount < s.maxCapacity);
+      if (available) {
+        await this.appointmentService.moveAppointmentToSlot(appt.id, available);
+        return {
+          appointmentId: appt.id,
+          patientId: appt.patientId,
+          originalDate: date,
+          newDate: futureDate,
+          newSlotId: available.id,
+          newTime: `${available.startTime} – ${available.endTime}`,
+          action: 'AUTO_MOVED_TO_FUTURE_DATE',
+        };
+      }
+    }
+
     return null;
   }
 
-  /**
-   * Tries to move a WAVE appointment to another available wave on the same
-   * date that falls within the new availability window.
-   */
+
   private async tryAutoMoveWave(
     appt: Appointment,
     doctorId: string,
@@ -838,20 +1114,27 @@ export class AvailabilityService {
     const newStartMin = this.timeToMinutes(newStart);
     const newEndMin   = this.timeToMinutes(newEnd);
 
+    // Step 1 — find nearest wave on SAME date within new window
     const candidates = await this.waveRepo.find({
       where: { doctorId, date },
       order: { startTime: 'ASC' },
     });
 
-    for (const wave of candidates) {
-      if (wave.id === appt.waveId) continue;
-      if (this.timeToMinutes(wave.startTime) < newStartMin) continue;
-      if (this.timeToMinutes(wave.endTime)   > newEndMin)   continue;
-      if (wave.bookedCount >= wave.maxPatients) continue;
+    // Sort by proximity to original wave start time
+    const apptWaveStartMin = this.timeToMinutes((appt.waveStartTime ?? '00:00').substring(0, 5));
+    const sorted = candidates
+      .filter((w) => w.id !== appt.waveId)
+      .filter((w) => this.timeToMinutes(w.startTime.substring(0, 5)) >= newStartMin)
+      .filter((w) => this.timeToMinutes(w.endTime.substring(0, 5))   <= newEndMin)
+      .filter((w) => w.bookedCount < w.maxPatients)
+      .sort((a, b) =>
+        Math.abs(this.timeToMinutes(a.startTime.substring(0, 5)) - apptWaveStartMin) -
+        Math.abs(this.timeToMinutes(b.startTime.substring(0, 5)) - apptWaveStartMin),
+      );
 
-      // Move appointment to this wave
+    if (sorted.length > 0) {
+      const wave = sorted[0];
       await this.appointmentService.moveAppointmentToWave(appt.id, wave);
-
       return {
         appointmentId: appt.id,
         patientId: appt.patientId,
@@ -862,6 +1145,34 @@ export class AvailabilityService {
       };
     }
 
+    // Step 2 — search next 2 future dates
+    const dayOfWeek = this.getDayOfWeek(date);
+    // Step 2 — search next 14 days (any date, nearest first)
+    for (let i = 1; i <= 14; i++) {
+      const d = new Date(date);
+      d.setDate(d.getDate() + i);
+      const futureDate = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
+
+      const futureWaves = await this.waveRepo.find({
+        where: { doctorId, date: futureDate },
+        order: { startTime: 'ASC' },
+      });
+      const available = futureWaves.find((w) => w.bookedCount < w.maxPatients);
+      if (available) {
+        await this.appointmentService.moveAppointmentToWave(appt.id, available);
+        return {
+          appointmentId: appt.id,
+          patientId: appt.patientId,
+          originalDate: date,
+          newDate: futureDate,
+          newWaveId: available.id,
+          newTimeWindow: `${available.startTime} – ${available.endTime}`,
+          action: 'AUTO_MOVED_TO_FUTURE_DATE',
+        };
+      }
+    }
+
+    // No wave found — return null to trigger rollback
     return null;
   }
 
@@ -879,14 +1190,19 @@ export class AvailabilityService {
 
     const target = dayIndex[dayOfWeek];
     const dates: string[] = [];
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
+
+    // Use UTC consistently to avoid timezone day-shift issues
+    const now = new Date();
+    const todayUtc = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
 
     for (let i = 0; i <= days; i++) {
-      const d = new Date(today);
-      d.setDate(today.getDate() + i);
-      if (d.getDay() === target) {
-        dates.push(d.toISOString().split('T')[0]);
+      const d = new Date(todayUtc);
+      d.setUTCDate(todayUtc.getUTCDate() + i);
+      if (d.getUTCDay() === target) {
+        const yyyy = d.getUTCFullYear();
+        const mm   = String(d.getUTCMonth() + 1).padStart(2, '0');
+        const dd   = String(d.getUTCDate()).padStart(2, '0');
+        dates.push(`${yyyy}-${mm}-${dd}`);
       }
     }
 

@@ -22,22 +22,31 @@ import { UpdateDoctorDto } from './dto/update-doctor.dto';
 export class DoctorController {
   constructor(private readonly doctorService: DoctorService) {}
 
-  
   @Post('profile')
   @HttpCode(HttpStatus.CREATED)
   createProfile(@Req() req: any, @Body() dto: CreateDoctorDto) {
     return this.doctorService.createProfile(req.user.id, dto);
   }
 
-  
   @Get('profile')
   getProfile(@Req() req: any) {
     return this.doctorService.getProfile(req.user.id);
   }
 
- 
   @Patch('profile')
   updateProfile(@Req() req: any, @Body() dto: UpdateDoctorDto) {
     return this.doctorService.updateProfile(req.user.id, dto);
+  }
+}
+
+@Controller('patient/doctors')
+@UseGuards(JwtAuthGuard, RolesGuard)
+@Roles('PATIENT')
+export class PatientDoctorController {
+  constructor(private readonly doctorService: DoctorService) {}
+
+  @Get()
+  getAllDoctors() {
+    return this.doctorService.getAllDoctors();
   }
 }
