@@ -132,34 +132,4 @@ export class PatientAvailabilityController {
     };
     return this.appointmentService.bookAppointment(req.user.id, dto);
   }
-
- 
-  @Post('book/stream')
-  @HttpCode(HttpStatus.CREATED)
-  bookStream(
-    @Req() req: any,
-    @Body() body: { slotId: string; doctorId: string; date: string },
-  ) {
-    const dto: BookAppointmentDto = {
-      doctorId: body.doctorId,
-      date: body.date,
-      slotId: body.slotId,
-    };
-    return this.appointmentService.bookAppointment(req.user.id, dto);
-  }
-
-
-  @Post('book/wave')
-  @HttpCode(HttpStatus.CREATED)
-  bookWave(
-    @Req() req: any,
-    @Body() body: { slotId: string; doctorId: string; date: string },
-  ) {
-    const dto: BookAppointmentDto = {
-      doctorId: body.doctorId,
-      date: body.date,
-      slotId: body.slotId,
-    };
-    return this.appointmentService.bookAppointment(req.user.id, dto);
-  }
 }

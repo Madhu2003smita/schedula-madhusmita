@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { AuditLogModule } from '../audit-log/audit-log.module';
 import { AuthModule } from '../auth/auth.module';
 import { AppointmentModule } from '../appointment/appointment.module';
 import { Booking } from '../scheduling/entities/booking.entity';
@@ -15,6 +16,7 @@ import { RecurringAvailability } from './entities/recurring-availability.entity'
     TypeOrmModule.forFeature([RecurringAvailability, CustomAvailability, StreamSlot, Wave, Booking]),
     AuthModule,
     AppointmentModule,
+    AuditLogModule,
   ],
   controllers: [AvailabilityController, PatientAvailabilityController],
   providers: [AvailabilityService],
