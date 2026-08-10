@@ -138,15 +138,19 @@ export class AvailabilityService {
 
     // ── 2-hour buffer: only allow expand/shrink if next occurrence is > 2 hours away
     if (isShrink || isExpand) {
-      const nextDate = this.getFutureDatesForDayOfWeek(newDay, 7)[0];
-      if (nextDate) {
+      const upcomingDates = this.getFutureDatesForDayOfWeek(newDay, 14);
+      const now = new Date();
+      const twoHoursFromNow = new Date(now.getTime() + 2 * 60 * 60 * 1000);
+
+      for (const nextDate of upcomingDates) {
         const sessionStart = new Date(`${nextDate}T${availability.startTime.substring(0, 5)}:00`);
-        const twoHoursFromNow = new Date(Date.now() + 2 * 60 * 60 * 1000);
+        if (sessionStart <= now) continue; // skip past sessions
         if (sessionStart <= twoHoursFromNow) {
           throw new BadRequestException(
             'Cannot modify availability within 2 hours of the next scheduled session',
           );
         }
+        break; // found a future session that is > 2 hours away — allow
       }
     }
 
@@ -872,17 +876,7 @@ export class AvailabilityService {
 
 
 
-  // ─── Elastic Scheduling Helpers ─────────────────────────────────────────────
-
-  /**
-   * Generates new slots for the EXPANDED portion of a recurring availability
-   * across all future dates matching the dayOfWeek.
-   *
-   * Only the newly added time windows are generated:
-   *  - If start moved earlier:  generate slots from newStart to oldStart
-   *  - If end moved later:      generate slots from oldEnd to newEnd
-   * Existing slots in the original window are NOT touched.
-   */
+ 
   private async expandSlotsForRecurring(
     doctorId: string,
     dayOfWeek: DayOfWeek,
