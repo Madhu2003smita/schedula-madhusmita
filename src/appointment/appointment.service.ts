@@ -9,6 +9,8 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, Repository } from 'typeorm';
 import { AuditAction } from '../audit-log/audit-log.entity';
 import { AuditLogService } from '../audit-log/audit-log.service';
+import { NotificationService } from '../notification/notification.service';
+import { NotificationType } from '../notification/notification.entity';
 import { StreamSlot } from '../scheduling/entities/stream-slot.entity';
 import { Wave } from '../scheduling/entities/wave.entity';
 import { BookAppointmentDto } from './dto/book-appointment.dto';
@@ -30,47 +32,52 @@ export class AppointmentService {
     private readonly waveRepo: Repository<Wave>,
     private readonly dataSource: DataSource,
     private readonly auditLogService: AuditLogService,
+    private readonly notificationService: NotificationService,
   ) {}
 
 
 
   async bookAppointment(patientId: string, dto: BookAppointmentDto) {
-    if (!dto.date) {
-      throw new BadRequestException(
-        'date is required in the request body (format: YYYY-MM-DD)',
-      );
-    }
-
-    if (!dto.doctorId) {
-      throw new BadRequestException('doctorId is required in the request body');
-    }
-
-    if (!dto.slotId) {
-      throw new BadRequestException(
-        'slotId is required. Use the id returned by GET /patient/availability/:doctorId?date=...',
-      );
-    }
+    if (!dto.date) throw new BadRequestException('date is required (format: YYYY-MM-DD)');
+    if (!dto.doctorId) throw new BadRequestException('doctorId is required');
+    if (!dto.time) throw new BadRequestException('time is required (format: HH:MM)');
 
     this.validateFutureDate(dto.date);
 
-    const streamSlot = await this.streamSlotRepo.findOne({
-      where: { id: dto.slotId, doctorId: dto.doctorId, date: dto.date },
+    // Find the first available STREAM slot at or after the requested time
+    const streamSlots = await this.streamSlotRepo.find({
+      where: { doctorId: dto.doctorId, date: dto.date },
+      order: { startTime: 'ASC' },
     });
 
-    if (streamSlot) {
-      return this.bookStream(patientId, dto.doctorId, dto.date, streamSlot);
+    const matchingStream = streamSlots.find(
+      (s) =>
+        s.startTime.substring(0, 5) >= dto.time &&
+        s.bookedCount < s.maxCapacity,
+    );
+
+    if (matchingStream) {
+      return this.bookStream(patientId, dto.doctorId, dto.date, matchingStream);
     }
 
-    const wave = await this.waveRepo.findOne({
-      where: { id: dto.slotId, doctorId: dto.doctorId, date: dto.date },
+    // Find the first available WAVE at or after the requested time
+    const waves = await this.waveRepo.find({
+      where: { doctorId: dto.doctorId, date: dto.date },
+      order: { startTime: 'ASC' },
     });
 
-    if (wave) {
-      return this.bookWave(patientId, dto.doctorId, dto.date, wave);
+    const matchingWave = waves.find(
+      (w) =>
+        w.startTime.substring(0, 5) >= dto.time &&
+        w.bookedCount < w.maxPatients,
+    );
+
+    if (matchingWave) {
+      return this.bookWave(patientId, dto.doctorId, dto.date, matchingWave);
     }
 
     throw new NotFoundException(
-      `No slot found with id ${dto.slotId} for this doctor on ${dto.date}`,
+      `No available slot found for doctor on ${dto.date} at or after ${dto.time}`,
     );
   }
 
@@ -129,6 +136,14 @@ export class AppointmentService {
       await this.auditLogService.log(
         AuditAction.APPOINTMENT_BOOKED, patientId, saved.id,
         `STREAM booked with doctor ${doctorId} on ${date} at ${lockedSlot.startTime}–${lockedSlot.endTime}`,
+      );
+
+      await this.notificationService.notify(
+        patientId,
+        saved.id,
+        NotificationType.APPOINTMENT_BOOKED,
+        'Appointment Booked',
+        `Your appointment has been booked successfully for ${date} at ${lockedSlot.startTime}.`,
       );
 
       return {
@@ -190,6 +205,14 @@ export class AppointmentService {
       await this.auditLogService.log(
         AuditAction.APPOINTMENT_BOOKED, patientId, saved.id,
         `WAVE booked with doctor ${doctorId} on ${date} at ${lockedWave.startTime}–${lockedWave.endTime}, token #${tokenNumber}`,
+      );
+
+      await this.notificationService.notify(
+        patientId,
+        saved.id,
+        NotificationType.APPOINTMENT_BOOKED,
+        'Appointment Booked',
+        `Your appointment has been booked successfully for ${date} at ${lockedWave.startTime}. Your token number is ${tokenNumber}.`,
       );
 
       return {
@@ -294,6 +317,14 @@ export class AppointmentService {
       `Cancelled. Was on ${appointment.date} at ${appointment.startTime ?? appointment.waveStartTime}`,
     );
 
+    await this.notificationService.notify(
+      patientId,
+      appointment.id,
+      NotificationType.APPOINTMENT_CANCELLED,
+      'Appointment Cancelled',
+      `Your appointment scheduled on ${appointment.date} at ${appointment.startTime ?? appointment.waveStartTime} has been cancelled.`,
+    );
+
     return {
       appointmentId: appointment.id,
       status: 'CANCELLED',
@@ -341,14 +372,12 @@ export class AppointmentService {
     // 6. New date must be today or in the future
     this.validateFutureDate(dto.date);
 
-    // 7. slotId is required
-    if (!dto.slotId) {
-      throw new BadRequestException(
-        'slotId is required. Use the id returned by GET /patient/availability/:doctorId?date=...',
-      );
+    // 7. time is required
+    if (!dto.time) {
+      throw new BadRequestException('time is required (format: HH:MM)');
     }
 
-    // 8. Dispatch by type
+    // 8. Dispatch by type — find slot by time
     if (appointment.appointmentType === AppointmentType.STREAM) {
       return this.rescheduleStream(patientId, appointment, dto);
     } else if (appointment.appointmentType === AppointmentType.WAVE) {
@@ -364,21 +393,29 @@ export class AppointmentService {
     dto: RescheduleAppointmentDto,
   ) {
     // Look up the requested new slot (outside transaction for early validation)
-    const newSlot = await this.streamSlotRepo.findOne({
-      where: { id: dto.slotId, doctorId: appointment.doctorId, date: dto.date },
+    // Find slot by time — first available stream slot at or after the requested time
+    const streamSlots = await this.streamSlotRepo.find({
+      where: { doctorId: appointment.doctorId, date: dto.date },
+      order: { startTime: 'ASC' },
     });
+
+    const newSlot = streamSlots.find(
+      (s) =>
+        s.startTime.substring(0, 5) >= dto.time &&
+        s.bookedCount < s.maxCapacity,
+    );
 
     if (!newSlot) {
       const suggestion = await this.findNextAvailableStream(appointment.doctorId, dto.date);
       throw new NotFoundException({
-        message: `No stream slot found with id ${dto.slotId} for doctor on ${dto.date}`,
+        message: `No available stream slot found for doctor on ${dto.date} at or after ${dto.time}`,
         suggestion,
       });
     }
 
     const isSameSlot =
       appointment.streamSlotId === newSlot.id ||
-      (appointment.date === dto.date && appointment.startTime === newSlot.startTime);
+      (appointment.date === dto.date && appointment.startTime?.substring(0, 5) === newSlot.startTime.substring(0, 5));
     if (isSameSlot) {
       throw new BadRequestException('Cannot reschedule to the same slot and time');
     }
@@ -433,6 +470,14 @@ export class AppointmentService {
         `STREAM rescheduled to ${dto.date} at ${lockedSlot.startTime}–${lockedSlot.endTime}`,
       );
 
+      await this.notificationService.notify(
+        patientId,
+        appointment.id,
+        NotificationType.APPOINTMENT_RESCHEDULED,
+        'Appointment Rescheduled',
+        `Your appointment has been rescheduled to ${dto.date} at ${lockedSlot.startTime}.`,
+      );
+
       return {
         appointmentId: appointment.id,
         status: 'RESCHEDULED',
@@ -447,14 +492,22 @@ export class AppointmentService {
     appointment: Appointment,
     dto: RescheduleAppointmentDto,
   ) {
-    const newWave = await this.waveRepo.findOne({
-      where: { id: dto.slotId, doctorId: appointment.doctorId, date: dto.date },
+    // Find the first available wave at or after the requested time — same pattern as stream
+    const waves = await this.waveRepo.find({
+      where: { doctorId: appointment.doctorId, date: dto.date },
+      order: { startTime: 'ASC' },
     });
+
+    const newWave = waves.find(
+      (w) =>
+        w.startTime.substring(0, 5) >= dto.time &&
+        w.bookedCount < w.maxPatients,
+    );
 
     if (!newWave) {
       const suggestion = await this.findNextAvailableWave(appointment.doctorId, dto.date);
       throw new NotFoundException({
-        message: `No wave found with id ${dto.slotId} for doctor on ${dto.date}`,
+        message: `No available wave found for doctor on ${dto.date} at or after ${dto.time}`,
         suggestion,
       });
     }
@@ -512,6 +565,14 @@ export class AppointmentService {
       await this.auditLogService.log(
         AuditAction.APPOINTMENT_RESCHEDULED, appointment.patientId, appointment.id,
         `WAVE rescheduled to ${dto.date} at ${lockedWave.startTime}–${lockedWave.endTime}, token #${tokenNumber}`,
+      );
+
+      await this.notificationService.notify(
+        appointment.patientId,
+        appointment.id,
+        NotificationType.APPOINTMENT_RESCHEDULED,
+        'Appointment Rescheduled',
+        `Your appointment has been rescheduled to ${dto.date} at ${lockedWave.startTime}. Your new token number is ${tokenNumber}.`,
       );
 
       return {
@@ -607,10 +668,7 @@ export class AppointmentService {
     return null;
   }
 
-  /**
-   * System-initiated cancellation — used during availability shrink as last resort.
-   * Does NOT enforce 30-min cutoff or ownership check.
-   */
+  
   async cancelAppointmentBySystem(appointmentId: string): Promise<void> {
     const appointment = await this.appointmentRepo.findOne({ where: { id: appointmentId } });
     if (!appointment) return;
@@ -635,6 +693,15 @@ export class AppointmentService {
 
     appointment.status = AppointmentStatus.CANCELLED;
     await this.appointmentRepo.save(appointment);
+
+    // Notify patient of system-initiated cancellation
+    await this.notificationService.notify(
+      appointment.patientId,
+      appointment.id,
+      NotificationType.APPOINTMENT_CANCELLED,
+      'Appointment Cancelled',
+      `Your appointment scheduled on ${appointment.date} at ${appointment.startTime ?? appointment.waveStartTime} has been cancelled due to a change in doctor availability.`,
+    );
   }
 
   async findAppointmentsBySlotId(streamSlotId: string): Promise<Appointment[]> {
@@ -691,6 +758,14 @@ export class AppointmentService {
       AuditAction.APPOINTMENT_AUTO_MOVED, appt.patientId, appt.id,
       `STREAM auto-moved to ${newSlot.startTime}–${newSlot.endTime} on ${newSlot.date} due to availability shrink`,
     );
+
+    await this.notificationService.notify(
+      appt.patientId,
+      appt.id,
+      NotificationType.APPOINTMENT_RESCHEDULED,
+      'Appointment Rescheduled',
+      `Your appointment has been automatically rescheduled to ${newSlot.date} at ${newSlot.startTime} due to a change in doctor availability.`,
+    );
   }
 
  
@@ -723,6 +798,14 @@ export class AppointmentService {
     await this.auditLogService.log(
       AuditAction.APPOINTMENT_AUTO_MOVED, appt.patientId, appt.id,
       `WAVE auto-moved to ${newWave.startTime}–${newWave.endTime} on ${newWave.date}, token #${tokenNumber} due to availability shrink`,
+    );
+
+    await this.notificationService.notify(
+      appt.patientId,
+      appt.id,
+      NotificationType.APPOINTMENT_RESCHEDULED,
+      'Appointment Rescheduled',
+      `Your appointment has been automatically rescheduled to ${newWave.date} at ${newWave.startTime}. Your new token number is ${tokenNumber}.`,
     );
   }
   

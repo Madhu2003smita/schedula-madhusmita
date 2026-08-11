@@ -128,7 +128,7 @@ export class PatientAvailabilityController {
     const dto: BookAppointmentDto = {
       doctorId: body.doctorId,
       date: body.date,
-      slotId: body.slotId,
+      time: body.slotId,
     };
     return this.appointmentService.bookAppointment(req.user.id, dto);
   }
